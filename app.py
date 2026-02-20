@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import concurrent.futures
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 import base64
 
@@ -14,6 +14,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Configuração do Fuso Horário (Brasília/Goiânia: UTC-3)
+fuso_br = timezone(timedelta(hours=-3))
 
 # Funções de Formatação de Moeda Brasileira
 def formatar_moeda_simples(valor):
@@ -136,21 +139,17 @@ def toggle_todos():
 with st.sidebar:
     st.markdown("### Filtros de Pesquisa")
     
-    tipos_permitidos = st.multiselect(
-        "Considerar Preços:",
-        ["Homologado", "Estimado"],
-        default=["Homologado"]
-    )
+    st.text_input("Considerar Preços:", value="Apenas Homologados", disabled=True)
     
     regra_calculo = st.selectbox(
         "Parâmetro de Cálculo",
-        ["Decreto Estadual (GO) 9900/2021"]
+        ["Preços válidos - Mediana ±25% e Média"]
     )
     
     st.markdown("---")
     
-    meses_corte = st.slider("Período de Pesquisa", min_value=6, max_value=60, value=36, step=6, format="%d meses")
-    paginas = st.number_input("Volume de Busca (Páginas)", min_value=1, max_value=50, value=3)
+    meses_corte = st.slider("Período de Pesquisa", min_value=12, max_value=60, value=24, step=6, format="%d meses")
+    paginas = st.number_input("Volume de Busca (Páginas)", min_value=1, max_value=5, value=3)
 
 # --- 4. ENGINE DE PESQUISA (TRAVADO) ---
 class PNCPEngine:
@@ -221,21 +220,13 @@ class PNCPEngine:
                 for item in resp.json():
                     desc = str(item.get("descricao", "")).lower()
                     
-                    # LOGICA: Busca Multi-Termos (Separados por Espaço)
                     termos = termo_busca.lower().split()
                     if all(t in desc for t in termos):
                         preco_final = 0.0
-                        tipo_valor = ""
                         
                         val_h = self._obter_valor_homologado_robusto(cnpj, ano, seq, item)
                         if val_h > 0:
                             preco_final = val_h
-                            tipo_valor = "Homologado"
-                        else:
-                            val_e = item.get("valorUnitarioEstimado")
-                            if val_e and float(val_e) > 0:
-                                preco_final = float(val_e)
-                                tipo_valor = "Estimado"
                         
                         if preco_final > 0:
                             itens.append({
@@ -245,7 +236,6 @@ class PNCPEngine:
                                 "Qtd": item.get("quantidade"),
                                 "Preço": preco_final,
                                 "Valor Unitário": formatar_moeda_ordenavel(preco_final), 
-                                "Tipo": tipo_valor,
                                 "Link PNCP": link_audit 
                             })
             return itens
@@ -255,7 +245,7 @@ class PNCPEngine:
 def processar_precos_regra(df, regra):
     if df.empty: return df, pd.DataFrame(), 0, 0, 0
     
-    if regra == "Decreto Estadual (GO) 9900/2021":
+    if regra == "Preços válidos - Mediana ±25% e Média":
         mediana_geral = df['Preço'].median()
         limite_inferior = mediana_geral * 0.75
         limite_superior = mediana_geral * 1.25
@@ -267,8 +257,7 @@ def processar_precos_regra(df, regra):
 
 def ordenar_validos(df):
     if df.empty: return df
-    df['Tipo'] = pd.Categorical(df['Tipo'], categories=['Homologado', 'Estimado'], ordered=True)
-    return df.sort_values(by=['Tipo', 'Preço'])
+    return df.sort_values(by=['Preço'])
 
 def ordenar_outliers(df):
     if df.empty: return df
@@ -311,9 +300,6 @@ with st.form(key='search_form'):
 
 # --- EXECUÇÃO DA BUSCA ---
 if btn_buscar and termo:
-    if not tipos_permitidos:
-        st.error("Selecione pelo menos um Tipo de Preço na barra lateral.")
-        st.stop()
         
     engine = PNCPEngine()
     
@@ -362,17 +348,18 @@ if not st.session_state['dados_brutos'].empty:
     # Aplica os Filtros Laterais Atuais
     try:
         df_raw['dt'] = pd.to_datetime(df_raw['Data'], format="%d/%m/%Y", errors='coerce')
-        limite_data = datetime.now() - relativedelta(months=meses_corte)
-        df_raw = df_raw[(df_raw['dt'] >= limite_data) & (df_raw['Tipo'].isin(tipos_permitidos))].copy()
+        limite_data = datetime.now(fuso_br) - relativedelta(months=meses_corte)
+        df_raw['dt'] = df_raw['dt'].dt.tz_localize(fuso_br)
+        df_raw = df_raw[(df_raw['dt'] >= limite_data)].copy()
         df_raw = df_raw.drop(columns=['dt'])
     except:
-        df_raw = df_raw[df_raw['Tipo'].isin(tipos_permitidos)].copy()
+        pass
 
     if df_raw.empty:
-        st.warning("Nenhum item restou após a aplicação dos filtros de data/tipo.")
+        st.warning("Nenhum item restou após a aplicação do filtro de data.")
     else:
         # Verifica se os filtros mudaram para resetar o Editor e calcular os Outliers Iniciais
-        current_hash = f"{len(df_raw)}_{meses_corte}_{''.join(tipos_permitidos)}_{regra_calculo}"
+        current_hash = f"{len(df_raw)}_{meses_corte}_{regra_calculo}"
         
         if st.session_state['filter_hash'] != current_hash:
             st.session_state['filter_hash'] = current_hash
@@ -408,7 +395,7 @@ if not st.session_state['dados_brutos'].empty:
                     "Valor Unitário": st.column_config.TextColumn("Valor Unitário"),
                     "Link PNCP": st.column_config.LinkColumn("Link PNCP", display_text="Acessar PNCP")
                 },
-                disabled=["Data", "Órgão", "Item", "Tipo", "Qtd", "Valor Unitário", "Link PNCP"],
+                disabled=["Data", "Órgão", "Item", "Qtd", "Valor Unitário", "Link PNCP"],
                 hide_index=True,
                 use_container_width=True
             )
@@ -467,7 +454,7 @@ if not st.session_state['dados_brutos'].empty:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown("#### Tabela 1: Preços válidos")
                 
-                df_view_validos = df_validos[['Data', 'Órgão', 'Item', 'Tipo', 'Qtd', 'Valor Unitário', 'Link PNCP']]
+                df_view_validos = df_validos[['Data', 'Órgão', 'Item', 'Qtd', 'Valor Unitário', 'Link PNCP']]
                 st.dataframe(
                     df_view_validos,
                     column_config={"Link PNCP": st.column_config.LinkColumn("Link PNCP", display_text=None)},
@@ -478,7 +465,7 @@ if not st.session_state['dados_brutos'].empty:
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown("#### Tabela 2: Preços descartados")
                     
-                    df_view_outliers = df_outliers_sorted[['Data', 'Órgão', 'Item', 'Tipo', 'Qtd', 'Valor Unitário', 'Link PNCP']]
+                    df_view_outliers = df_outliers_sorted[['Data', 'Órgão', 'Item', 'Qtd', 'Valor Unitário', 'Link PNCP']]
                     st.dataframe(
                         df_view_outliers,
                         column_config={"Link PNCP": st.column_config.LinkColumn("Link PNCP", display_text=None)},
@@ -487,6 +474,7 @@ if not st.session_state['dados_brutos'].empty:
 
                 # --- RELATÓRIO PDF ---
                 def gerar_pdf(df_v, df_o, termo):
+                    data_emissao = datetime.now(fuso_br).strftime('%d/%m/%Y às %H:%M:%S')
                     html = f"""
                     <html lang="pt-BR"><head><meta charset="UTF-8"><style>
                         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
@@ -499,25 +487,26 @@ if not st.session_state['dados_brutos'].empty:
                         a {{ color: #003B71; text-decoration: none; font-weight: bold; }}
                     </style></head><body>
                         <h1>Relatório de Pesquisa de Mercado</h1>
+                        <p style="text-align: right; color: #64748B;">Emitido em: {data_emissao}</p>
                         <div class="stats">
                             <b>Objeto:</b> {termo}<br>
-                            <b>Metodologia:</b> {regra_calculo}<br>
-                            <b>Média Saneada:</b> {formatar_moeda_simples(media_saneada)} | <b>Mediana:</b> {formatar_moeda_simples(mediana_geral)} <br>
+                            <b>Metodologia Aplicada:</b> {regra_calculo}<br>
+                            <b>Média Saneada:</b> {formatar_moeda_simples(media_saneada)} | <b>Mediana (Base):</b> {formatar_moeda_simples(mediana_geral)} <br>
                             <b>Menor Válido:</b> {formatar_moeda_simples(menor_valido)} | <b>Maior Válido:</b> {formatar_moeda_simples(maior_valido)} <br>
                             <b>Amostras Úteis:</b> {total_uteis} itens de {total_registros} selecionados na curadoria.
                         </div>
                         
                         <h3>Tabela 1: Preços válidos</h3>
-                        <table><thead><tr><th width="8%">Data</th><th width="15%">Órgão</th><th width="25%">Item</th><th width="10%">Tipo</th><th width="12%">Preço</th><th width="30%">Link PNCP</th></tr></thead><tbody>
+                        <table><thead><tr><th width="8%">Data</th><th width="15%">Órgão</th><th width="25%">Item</th><th width="12%">Preço</th><th width="30%">Link PNCP</th></tr></thead><tbody>
                     """
                     for _, r in df_v.iterrows():
-                        html += f"<tr><td>{r['Data']}</td><td>{r['Órgão']}</td><td>{r['Item']}</td><td>{r['Tipo']}</td><td>{r['Valor Unitário'].strip()}</td><td><a href='{r['Link PNCP']}'>{r['Link PNCP']}</a></td></tr>"
+                        html += f"<tr><td>{r['Data']}</td><td>{r['Órgão']}</td><td>{r['Item']}</td><td>{r['Valor Unitário'].strip()}</td><td><a href='{r['Link PNCP']}'>{r['Link PNCP']}</a></td></tr>"
                     html += "</tbody></table>"
 
                     if not df_o.empty:
-                        html += "<h3 style='margin-top: 30px;'>Tabela 2: Preços descartados</h3><table><thead><tr><th width='8%'>Data</th><th width='15%'>Órgão</th><th width='25%'>Item</th><th width='10%'>Tipo</th><th width='12%'>Preço</th><th width='30%'>Link PNCP</th></tr></thead><tbody>"
+                        html += "<h3 style='margin-top: 30px;'>Tabela 2: Preços descartados</h3><table><thead><tr><th width='8%'>Data</th><th width='15%'>Órgão</th><th width='25%'>Item</th><th width='12%'>Preço</th><th width='30%'>Link PNCP</th></tr></thead><tbody>"
                         for _, r in df_o.iterrows():
-                            html += f"<tr><td>{r['Data']}</td><td>{r['Órgão']}</td><td>{r['Item']}</td><td>{r['Tipo']}</td><td>{r['Valor Unitário'].strip()}</td><td><a href='{r['Link PNCP']}'>{r['Link PNCP']}</a></td></tr>"
+                            html += f"<tr><td>{r['Data']}</td><td>{r['Órgão']}</td><td>{r['Item']}</td><td>{r['Valor Unitário'].strip()}</td><td><a href='{r['Link PNCP']}'>{r['Link PNCP']}</a></td></tr>"
                         html += "</tbody></table>"
 
                     html += "<script>window.print()</script></body></html>"
