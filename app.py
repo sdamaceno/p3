@@ -1,213 +1,231 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import requests
 import concurrent.futures
 import time
+import hashlib
+import re
+import io
+import json
+import zipfile
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
-import base64
+
+# Biblioteca de PDF (Requer: xhtml2pdf no requirements.txt)
+try:
+    from xhtml2pdf import pisa
+except ImportError:
+    st.error("Biblioteca 'xhtml2pdf' não encontrada. Verifique o arquivo requirements.txt no GitHub.")
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
-    page_title="Consulta de Preços - Análise de Mercado",
+    page_title="Planejamento de Compras - Análise de Mercado",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Configuração do Fuso Horário (Brasília/Goiânia: UTC-3)
 fuso_br = timezone(timedelta(hours=-3))
 
-# Funções de Formatação de Moeda Brasileira
+# --- FUNÇÕES DE LINGUAGEM E EXTRAÇÃO DE PALAVRAS-CHAVE ---
+def extrair_palavras_chave(texto, limite=10):
+    if not texto: return ""
+    stopwords = {"de", "a", "o", "que", "e", "do", "da", "em", "um", "para", "é", "com", "não", "uma", "os", "no", "se", "na", "por", "mais", "as", "dos", "como", "mas", "foi", "ao", "ele", "das", "tem", "à", "seu", "sua", "ou", "ser", "quando", "muito", "há", "nos", "já", "está", "eu", "também", "só", "pelo", "pela", "até", "isso", "ela", "entre", "era", "depois", "sem", "mesmo", "aos", "ter", "seus", "quem", "nas", "me", "esse", "eles", "estão", "você", "tinha", "foram", "essa", "num", "nem", "suas", "meu", "às", "minha", "têm", "numa", "pelos", "elas", "havia", "seja", "qual", "será", "nós", "tenho", "lhe", "deles", "essas", "esses", "pelas", "este", "fosse", "dele", "tu", "te", "vocês", "vos", "lhes", "meus", "minhas", "teu", "tua", "teus", "tuas", "nosso", "nossa", "nossos", "nossas", "dela", "delas", "esta", "estes", "estas", "aquele", "aquela", "aqueles", "aquelas", "isto", "aquilo", "estou", "estamos", "estão", "estive", "esteve", "estivemos", "estiveram", "estava", "estávamos", "estavam", "estivera", "estivéramos", "esteja", "sejamos", "sejam", "estivesse", "estivéssemos", "estivessem", "estiver", "estivermos", "estiverem", "hei", "há", "havemos", "hão", "houve", "houvemos", "houveram", "houvera", "houvéramos", "haja", "hajamos", "hajam", "houvesse", "houvéssemos", "houvessem", "houver", "houvermos", "houverem", "houverei", "houverá", "houveremos", "houverão", "houveria", "houveríamos", "houveriam", "sou", "somos", "são", "era", "éramos", "eram", "fui", "foi", "fomos", "foram", "fora", "fôramos", "seja", "sejamos", "sejam", "fosse", "fôssemos", "fossem", "for", "formos", "forem", "serei", "será", "seremos", "serão", "seria", "seríamos", "seriam", "tenho", "tem", "temos", "tém", "tinha", "tínhamos", "tinham", "tive", "teve", "tivemos", "tiveram", "tivera", "tivéramos", "tenha", "tenhamos", "tenham", "tivesse", "tivéssemos", "tivessem", "tiver", "tivermos", "tiverem", "terei", "terá", "teremos", "terão", "teria", "teríamos", "teriam"}
+    palavras = re.findall(r'\b[a-zÀ-ÿ]{3,}\b', texto.lower())
+    filtradas = [p for p in palavras if p not in stopwords]
+    contagem = Counter(filtradas)
+    top_words = [word for word, count in contagem.most_common(limite)]
+    return " ".join(top_words)
+
+# --- FUNÇÕES DE FORMATAÇÃO E UTILIDADES ---
 def formatar_moeda_simples(valor):
     try:
         formatted = f"{float(valor):,.2f}"
         return "R$ " + formatted.replace(",", "X").replace(".", ",").replace("X", ".")
-    except:
-        return "R$ 0,00"
+    except: return "R$ 0,00"
 
 def formatar_moeda_ordenavel(valor):
     try:
         val_f = float(valor)
         s = f"{val_f:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         return f"R$ {s.rjust(15, ' ')}"
-    except:
-        return "R$ " + "0,00".rjust(15, ' ')
+    except: return "R$ " + "0,00".rjust(15, ' ')
 
-# --- 2. CSS & DESIGN (COMPACTO E MONOCROMÁTICO) ---
+def formata_origem_pdf(origem):
+    origem_str = str(origem)
+    if origem_str.startswith("http"):
+        return f"<a href='{origem_str}' style='color: blue; text-decoration: underline;'>Acessar Fonte</a>"
+    return origem_str
+
+def gerar_hash_item(row):
+    lote = "Único" if pd.isna(row.get('Lote')) or str(row.get('Lote')).strip() == "" else str(row.get('Lote')).strip()
+    item = str(row.get('Item', '')).strip()
+    return hashlib.md5(f"{lote}_{item}".encode()).hexdigest()[:10]
+
+# Validações BR
+def validar_formatar_cpf_cnpj(doc):
+    if not doc: return ""
+    doc_cl = re.sub(r'\D', '', str(doc))
+    if len(doc_cl) == 11: return f"{doc_cl[:3]}.{doc_cl[3:6]}.{doc_cl[6:9]}-{doc_cl[9:]}"
+    elif len(doc_cl) == 14: return f"{doc_cl[:2]}.{doc_cl[2:5]}.{doc_cl[5:8]}/{doc_cl[8:12]}-{doc_cl[12:]}"
+    return None
+
+def validar_formatar_telefone(tel):
+    if not tel: return ""
+    t_cl = re.sub(r'\D', '', str(tel))
+    if len(t_cl) == 11: return f"({t_cl[:2]}) {t_cl[2:7]}-{t_cl[7:]}"
+    elif len(t_cl) == 10: return f"({t_cl[:2]}) {t_cl[2:6]}-{t_cl[6:]}"
+    return None
+
+def validar_email(email):
+    if not email: return True
+    return re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", str(email)) is not None
+
+def validar_link(link):
+    if not link: return True
+    return re.match(r"^https?://", str(link)) is not None
+
+# --- 2. CSS & DESIGN COMPACTO ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&family=Inter:wght@400;500&display=swap');
-
-    :root {
-        --tj-blue: #0F2C4C;      
-        --tj-gold: #B08D55;      
-        --text-main: #1E293B;
-    }
-
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-        color: var(--text-main);
-        background-color: #F8FAFC;
-    }
-    
+    :root { --tj-blue: #0F2C4C; --tj-gold: #B08D55; --text-main: #1E293B; }
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: var(--text-main); background-color: #F8FAFC; }
     h1, h2, h3, h4, h5 { font-family: 'Plus Jakarta Sans', sans-serif; }
-
     footer {visibility: hidden;}
     .block-container { padding-top: 1.5rem !important; padding-bottom: 100px !important; }
-
-    /* CABEÇALHO NATIVO E BOTÃO SANDUÍCHE */
     header[data-testid="stHeader"] { background-color: transparent !important; box-shadow: none !important; }
     header[data-testid="stHeader"] > div:not(:first-child) { display: none !important; }
-
-    [data-testid="collapsedControl"] {
-        position: fixed !important; top: 25px !important; left: 20px !important;
-        background-color: #FFFFFF !important; border: 1px solid #E2E8F0 !important;
-        border-radius: 8px !important; width: 45px !important; height: 45px !important;
-        z-index: 999999 !important; box-shadow: 0 2px 5px rgba(0,0,0,0.08) !important;
-        transition: all 0.2s ease; display: flex !important; align-items: center !important; justify-content: center !important;
-    }
-    [data-testid="collapsedControl"]:hover { background-color: #F1F5F9 !important; border-color: var(--tj-blue) !important; }
-    [data-testid="collapsedControl"] svg { display: none !important; }
-    [data-testid="collapsedControl"]::after {
-        content: ''; display: block; width: 24px; height: 24px; background-color: var(--tj-blue);
-        -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg>') no-repeat center;
-        mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg>') no-repeat center;
-    }
-
     [data-testid="stSidebar"] { background-color: #F8FAFC; border-right: 1px solid #E2E8F0; }
-
     .stApp { margin-top: 0px; }
-
-    .tj-header {
-        background: #FFFFFF; padding: 20px 5rem 20px 85px; margin-top: -1.5rem; 
-        margin-left: -5rem; margin-right: -5rem; border-bottom: 1px solid #E2E8F0;
-        display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
-    }
+    .tj-header { background: #FFFFFF; padding: 20px 5rem 20px 85px; margin-top: -1.5rem; margin-left: -5rem; margin-right: -5rem; border-bottom: 1px solid #E2E8F0; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
     .tj-logo-text { font-family: 'Plus Jakarta Sans'; font-weight: 700; font-size: 18px; color: var(--tj-blue); line-height: 1.2; }
     .tj-sub { font-weight: 400; font-size: 13px; color: #64748B; border-left: 1px solid #CBD5E1; padding-left: 10px; margin-left: 10px; }
-
-    .hero-container {
-        background: linear-gradient(180deg, #E6F2FF 0%, #FFFFFF 100%); padding: 40px 5rem;
-        margin-left: -5rem; margin-right: -5rem; text-align: center; border-bottom: 1px solid #F1F5F9; margin-bottom: 30px;
-    }
+    .hero-container { background: linear-gradient(180deg, #E6F2FF 0%, #FFFFFF 100%); padding: 40px 5rem; margin-left: -5rem; margin-right: -5rem; text-align: center; border-bottom: 1px solid #F1F5F9; margin-bottom: 30px; }
     .hero-title { color: var(--tj-blue); font-size: 32px; font-weight: 800; margin-bottom: 5px; }
-
-    .metric-card {
-        background: white; border: 1px solid #E2E8F0; border-radius: 8px; padding: 15px;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05); text-align: center; transition: transform 0.2s;
-        border-top: 4px solid var(--tj-gold); height: 100%; display: flex; flex-direction: column; justify-content: center;
-    }
+    .metric-card { background: white; border: 1px solid #E2E8F0; border-radius: 8px; padding: 15px; text-align: center; border-top: 4px solid var(--tj-gold); display: flex; flex-direction: column; justify-content: center; }
     .metric-card-secondary { border-top: 4px solid #64748B; background-color: #F8FAFC; }
     .metric-val { font-size: 20px; font-weight: 700; color: var(--tj-blue); }
     .metric-lbl { font-size: 11px; color: #64748B; text-transform: uppercase; margin-bottom: 4px; font-weight: 600; }
-
     .stButton > button { background-color: var(--tj-blue); color: white; border: none; border-radius: 6px; font-weight: 600; width: 100%; }
     .stButton > button:hover { background-color: #0B223D; color: white; }
-
-    .tj-footer {
-        position: fixed; bottom: 0; left: 0; width: 100%; background-color: var(--tj-blue);
-        color: white; text-align: center; padding: 20px 0; font-size: 12px; z-index: 1000; box-shadow: 0 -4px 6px -1px rgba(0,0,0,0.1);
-    }
-    
+    .tj-footer { position: fixed; bottom: 0; left: 0; width: 100%; background-color: var(--tj-blue); color: white; text-align: center; padding: 20px 0; font-size: 12px; z-index: 1000; box-shadow: 0 -4px 6px -1px rgba(0,0,0,0.1); }
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; font-weight: 600; }
-    
-    /* Tabelas e Totais Compactos */
-    .compact-table-container { margin-bottom: 0px; }
-    .subtotal-lote { text-align: right; font-weight: 600; color: #64748B; margin-bottom: 15px; margin-top: 5px; font-size: 14px; }
-    .lote-header { margin-top: 5px !important; margin-bottom: 5px !important; color: #0F2C4C;}
-    
-    /* Bloco de Valor Total em uma linha */
-    .total-global-compact {
-        background-color: #E6F2FF; padding: 15px 25px; border-radius: 6px; 
-        border-left: 5px solid #0F2C4C; display: flex; justify-content: space-between; 
-        align-items: center; margin-bottom: 15px; margin-top: 10px;
-    }
+    .total-global-compact { background-color: #E6F2FF; padding: 15px 25px; border-radius: 6px; border-left: 5px solid #0F2C4C; display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; margin-top: 10px; }
     .total-global-title { margin: 0; color: #0F2C4C; font-size: 16px; font-weight: 700; text-transform: uppercase; }
     .total-global-value { margin: 0; color: #0F2C4C; font-size: 26px; font-weight: 800; }
-
-    @media (max-width: 768px) {
-        .tj-header, .hero-container { margin-left: -1rem; margin-right: -1rem; padding-left: 80px; padding-right: 1rem; }
-        .total-global-compact { flex-direction: column; align-items: flex-end; }
-    }
+    .item-row { border-bottom: 1px solid #E2E8F0; padding: 10px 0; display: flex; align-items: center;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. MEMÓRIA DE SESSÃO E MENU LATERAL ---
-if 'dados_brutos' not in st.session_state:
-    st.session_state['dados_brutos'] = pd.DataFrame()
-if 'termo_pesquisado' not in st.session_state:
-    st.session_state['termo_pesquisado'] = ""
-if 'df_edicao' not in st.session_state:
-    st.session_state['df_edicao'] = pd.DataFrame()
-if 'filter_hash' not in st.session_state:
-    st.session_state['filter_hash'] = ""
-if 'step2_ready' not in st.session_state:
-    st.session_state['step2_ready'] = False
-if 'todos_marcados' not in st.session_state:
-    st.session_state['todos_marcados'] = True
-if 'lotes_contratacao' not in st.session_state:
-    st.session_state['lotes_contratacao'] = {}
+# --- 3. MEMÓRIA DE SESSÃO E ESTRUTURAS ---
+cols_pncp = ["Válido?", "Data", "Empresa/Órgão", "Item", "Qtd", "Preço", "Valor Unitário", "Origem", "Tipo"]
+cols_rastreio = ["Data do Contato", "Horário", "Empresa", "CNPJ/CPF", "Tipo de fonte", "Descrição da fonte", "Link da fonte", "Nome do Contato", "E-mail", "Telefone", "Situação", "Preço", "Valor Unitário"]
+cols_historico_busca = ["Data/Hora", "Termo Pesquisado", "Novos Registros"]
 
-def toggle_todos():
-    val = st.session_state['chk_todos_ui']
-    st.session_state['todos_marcados'] = val
-    if not st.session_state['df_edicao'].empty:
-        st.session_state['df_edicao']['Válido?'] = val
+if 'tr_objeto_salvo' not in st.session_state: st.session_state['tr_objeto_salvo'] = False
+if 'tr_itens_salvos' not in st.session_state: st.session_state['tr_itens_salvos'] = False
+if 'objeto_contratacao' not in st.session_state: st.session_state['objeto_contratacao'] = ""
+if 'keywords_extraidas' not in st.session_state: st.session_state['keywords_extraidas'] = ""
+if 'df_tr' not in st.session_state: st.session_state['df_tr'] = pd.DataFrame(columns=["Lote", "Item", "Descrição", "Métrica", "Tipo", "Quantidade"])
+if 'banco_precos' not in st.session_state: st.session_state['banco_precos'] = {}
+if 'acao_ativa' not in st.session_state: st.session_state['acao_ativa'] = (None, None)
 
+if 'df_processos' not in st.session_state:
+    st.session_state['df_processos'] = pd.DataFrame([
+        {"Fase": "Planejamento (Fase Interna)", "Etapa": "Identificação da Contratação", "Ator": "Requisitante", "Entrada": "DOD / Solicitação", "Saída": "Objeto Definido", "Automação": "Manual"},
+        {"Fase": "Planejamento (Fase Interna)", "Etapa": "Estruturação de Lotes", "Ator": "Equipe Técnica", "Entrada": "Planilha Excel", "Saída": "Itens Validados", "Automação": "Importação/Manual"},
+        {"Fase": "Pesquisa de Mercado", "Etapa": "Extração Base PNCP", "Ator": "Sistema (Robô)", "Entrada": "Termo de Busca", "Saída": "Preços Homologados", "Automação": "Automático (API)"},
+        {"Fase": "Pesquisa de Mercado", "Etapa": "Cotação Direta (Fornecedores)", "Ator": "Comprador", "Entrada": "E-mail / Telefone", "Saída": "Propostas Salvas", "Automação": "Manual / Rastreável"},
+        {"Fase": "Saneamento", "Etapa": "Validação Estatística", "Ator": "Sistema", "Entrada": "Preços Brutos", "Saída": "Outliers Removidos", "Automação": "Automático (Mediana ±25%)"},
+        {"Fase": "Relatório", "Etapa": "Geração do Termo Final", "Ator": "Sistema", "Entrada": "Dados Tratados", "Saída": "Relatório Oficial (PDF)", "Automação": "Automático (XHTML2PDF)"}
+    ])
+
+opcoes_origem_decreto = ["VI - Pesquisa direta c/ fornecedores", "I - Base estadual NFe", "II - Portal de Compras GO", "III - PNCP / Ferramentas específicas", "IV - Mídia / Tabelas / Sítios eletrônicos", "V - Contratações similares da adm. pública"]
+opcoes_situacao = ["Solicitação de proposta enviada", "Confirmação de recebimento da solicitação", "Proposta recebida", "Não enviou proposta comercial", "Proposta recebida com equívoco", "Proposta retificada recebida"]
+
+# Sidebar
 with st.sidebar:
-    st.markdown("### Filtros de Pesquisa")
-    
-    st.text_input("Considerar Preços:", value="Apenas Homologados", disabled=True)
-    tipos_permitidos = ["Homologado"] 
-    
-    regra_calculo = st.selectbox(
-        "Parâmetro de Cálculo",
-        ["Preços válidos - Mediana ±25% e Média"]
-    )
+    st.markdown("### Parâmetros Estatísticos")
+    st.text_input("Considerar PNCP:", value="Apenas Homologados", disabled=True)
+    regra_calculo = st.selectbox("Parâmetro de Cálculo", ["Preços válidos - Mediana ±25% e Média"])
+    meses_corte = st.slider("Período de PNCP/Atas", min_value=12, max_value=60, value=24, step=6, format="%d meses")
+    paginas_pncp = st.number_input("Volume Busca PNCP (Páginas)", min_value=1, max_value=5, value=3)
     
     st.markdown("---")
+    st.markdown("### 🔑 Assistente de Palavras-Chave")
+    qtd_kw = st.slider("Qtd. Máx. de Termos Extraídos", min_value=5, max_value=20, value=10)
     
-    meses_corte = st.slider("Período de Pesquisa", min_value=12, max_value=60, value=24, step=6, format="%d meses")
-    paginas = st.number_input("Volume de Busca (Páginas)", min_value=1, max_value=5, value=3)
+    if st.session_state['tr_objeto_salvo']:
+        st.caption("Termos extraídos do seu Objeto (Sugestão):")
+        kw_editadas = st.text_area("Termos:", value=st.session_state['keywords_extraidas'], height=80, key="kw_box")
+        st.session_state['keywords_extraidas'] = kw_editadas
+    else:
+        st.info("Salve o Objeto na Aba 1 para gerar as palavras-chave.")
 
-# --- 4. ENGINE DE PESQUISA ---
+# --- 4. ENGINE PNCP "CASCATA INTELIGENTE" ---
 class PNCPEngine:
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json"
-        })
+        self.session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", "Accept": "application/json"})
 
-    def buscar_editais(self, termo, paginas):
+    def buscar_editais_inteligente(self, termo, paginas=3, status_placeholder=None):
         base_url = "https://pncp.gov.br/api/search/"
-        editais = []
         busca_api = termo.replace('"', '').replace("'", "")
+        
+        # 1. Tentativa Exata (Rigorosa)
+        if status_placeholder: status_placeholder.update(label="🔎 Tentativa 1: Buscando frase exata nos editais...", state="running")
+        editais = self._executar_busca(base_url, busca_api, "edital", paginas)
+        if editais: return editais, "Exata"
+
+        # 2. Tentativa Flexível (Termos soltos)
+        stop_words = {"de", "da", "do", "para", "com", "sem", "e", "o", "a", "em", "um", "uma"}
+        termos_limpos = [w for w in busca_api.split() if w.lower() not in stop_words]
+        busca_flexivel = " ".join(termos_limpos)
+        
+        if busca_flexivel != busca_api:
+            if status_placeholder: status_placeholder.update(label="🔄 Tentativa 2: Refinando termos para busca ampla...", state="running")
+            editais = self._executar_busca(base_url, busca_flexivel, "edital", paginas)
+            if editais: return editais, "Flexível"
+
+        # 3. Tentativa Ampliada (Sem filtro de documento)
+        if status_placeholder: status_placeholder.update(label="⚠️ Tentativa 3: Expandindo para todos os tipos de documentos...", state="running")
+        editais = self._executar_busca(base_url, busca_flexivel, "", paginas)
+        if editais: return editais, "Ampliada"
+
+        return [], "Falha"
+
+    def _executar_busca(self, url, termo, tipo_doc, paginas):
+        editais_encontrados = []
         for p in range(1, paginas + 1):
-            params = {"q": busca_api, "tipos_documento": "edital", "ordenacao": "-dataPublicacaoPncp", "pagina": str(p), "tam_pagina": "50"}
+            params = {"q": termo, "ordenacao": "-dataPublicacaoPncp", "pagina": str(p), "tam_pagina": "50"}
+            if tipo_doc: params["tipos_documento"] = tipo_doc
             try:
-                resp = self.session.get(base_url, params=params, timeout=10)
+                resp = self.session.get(url, params=params, timeout=10)
                 if resp.status_code == 200:
                     items = resp.json().get('items', [])
                     if not items: break
-                    editais.extend(items)
+                    editais_encontrados.extend(items)
                 else: break
             except: break
-        return editais
+        return editais_encontrados
 
     def _obter_valor_homologado_robusto(self, cnpj, ano, seq, item):
         val_homologado = item.get("valorUnitarioHomologado")
         if val_homologado and float(val_homologado) > 0: return float(val_homologado)
+        
         num_item = item.get("numeroItem")
         url_resultado = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/itens/{num_item}/resultados"
         try:
-            res_resultado = self.session.get(url_resultado, timeout=3)
+            res_resultado = self.session.get(url_resultado, timeout=4)
             if res_resultado.status_code == 200:
                 for r in res_resultado.json():
                     val = r.get("valorUnitarioHomologado")
                     if val and float(val) > 0: return float(val)
         except: pass
+        
         situacao = str(item.get("situacaoCompraItem", ""))
         if situacao in ['4', '6']:
             val_fallback = item.get("valorUnitario")
@@ -223,12 +241,16 @@ class PNCPEngine:
             seq = edital.get("numero_sequencial")
             data_pub = edital.get("data_publicacao_pncp")[:10]
             if not (cnpj and ano and seq): return []
+            
             link_audit = f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
             url_itens = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/itens"
             resp = self.session.get(url_itens, timeout=10)
+            
             itens = []
             if resp.status_code == 200:
-                termos_chave = termo_busca.lower().split()
+                stop_words = {"de", "da", "do", "para", "com", "sem", "e", "o", "a", "em", "um", "uma", "aquisicao", "contratacao"}
+                termos_chave = [t for t in termo_busca.lower().split() if t not in stop_words]
+                
                 for item in resp.json():
                     desc = str(item.get("descricao", "")).lower()
                     if all(t in desc for t in termos_chave):
@@ -236,12 +258,13 @@ class PNCPEngine:
                         if val_h > 0:
                             itens.append({
                                 "Data": datetime.strptime(data_pub, "%Y-%m-%d").strftime("%d/%m/%Y"),
-                                "Órgão": razao.upper(),
+                                "Empresa/Órgão": razao.upper(), 
                                 "Item": item.get("descricao"),
                                 "Qtd": item.get("quantidade"),
                                 "Preço": float(val_h), 
                                 "Valor Unitário": formatar_moeda_ordenavel(val_h), 
-                                "Link PNCP": link_audit 
+                                "Origem": link_audit,
+                                "Tipo": "PNCP"
                             })
             return itens
         except: return []
@@ -249,13 +272,12 @@ class PNCPEngine:
 # --- 5. ESTATÍSTICA ---
 def processar_precos_regra(df, regra):
     if df.empty: return df, pd.DataFrame(), 0, 0, 0
-    if regra == "Preços válidos - Mediana ±25% e Média":
-        mediana_geral = df['Preço'].median()
-        limite_inferior = mediana_geral * 0.75
-        limite_superior = mediana_geral * 1.25
-        df_validos = df[(df['Preço'] >= limite_inferior) & (df['Preço'] <= limite_superior)].copy()
-        df_outliers = df[(df['Preço'] < limite_inferior) | (df['Preço'] > limite_superior)].copy()
-        return df_validos, df_outliers, mediana_geral, limite_inferior, limite_superior
+    mediana_geral = df['Preço'].median()
+    limite_inferior = mediana_geral * 0.75
+    limite_superior = mediana_geral * 1.25
+    df_validos = df[(df['Preço'] >= limite_inferior) & (df['Preço'] <= limite_superior)].copy()
+    df_outliers = df[(df['Preço'] < limite_inferior) | (df['Preço'] > limite_superior)].copy()
+    return df_validos, df_outliers, mediana_geral, limite_inferior, limite_superior
 
 def ordenar_validos(df):
     if df.empty: return df
@@ -271,25 +293,155 @@ def ordenar_outliers(df):
     restante = df.drop([idx_max, idx_min], errors='ignore')
     return pd.concat([row_max, row_min, restante])
 
-# --- LÓGICA DE EXCLUSIVIDADE "SEM LOTE" ---
-tem_sem_lote = "Sem Lote" in st.session_state['lotes_contratacao']
-tem_com_lote = any(k != "Sem Lote" for k in st.session_state['lotes_contratacao'].keys())
+# --- 6. MECANISMO DE PROJETO (BACKUP/RESTORE) ---
+def empacotar_projeto():
+    config_df = pd.DataFrame([{"Key": "objeto_contratacao", "Value": st.session_state.get('objeto_contratacao', '')}])
+    df_tr_export = st.session_state.get('df_tr', pd.DataFrame(columns=["Lote", "Item", "Descrição", "Métrica", "Tipo", "Quantidade"])).copy()
+    if not df_tr_export.empty: df_tr_export['Hash'] = df_tr_export.apply(gerar_hash_item, axis=1)
 
-if tem_sem_lote:
-    opcoes_agrupamento = ["Sem Lote"]
-    idx_padrao = 0
-    desabilitar_agrup = True
-elif tem_com_lote:
-    opcoes_agrupamento = ["Agrupar em Lotes"]
-    idx_padrao = 0
-    desabilitar_agrup = True
-else:
-    opcoes_agrupamento = ["Agrupar em Lotes", "Sem Lote"]
-    idx_padrao = 0
-    desabilitar_agrup = False
+    pncp_list, man_list, est_list, hist_list = [], [], [], []
+    for h, banco in st.session_state.get('banco_precos', {}).items():
+        if not banco['df_pncp'].empty:
+            df_p = banco['df_pncp'].copy()
+            df_p['Hash'] = h
+            pncp_list.append(df_p)
+        if not banco['df_manual_rastreio'].empty:
+            df_m = banco['df_manual_rastreio'].copy()
+            df_m['Hash'] = h
+            man_list.append(df_m)
+        if not banco['historico_buscas'].empty:
+            df_h = banco['historico_buscas'].copy()
+            df_h['Hash'] = h
+            hist_list.append(df_h)
+            
+        est_list.append({"Hash": h, "estatistica_pronta": banco['estatistica_pronta'], "media_saneada": banco['media_saneada'], "mediana": banco['mediana'], "amostras": banco['amostras']})
 
-# --- 6. RENDERIZAÇÃO DA INTERFACE ---
+    df_pncp_export = pd.concat(pncp_list, ignore_index=True) if pncp_list else pd.DataFrame(columns=cols_pncp + ['Hash'])
+    df_man_export = pd.concat(man_list, ignore_index=True) if man_list else pd.DataFrame(columns=cols_rastreio + ['Hash'])
+    df_hist_export = pd.concat(hist_list, ignore_index=True) if hist_list else pd.DataFrame(columns=cols_historico_busca + ['Hash'])
+    df_est_export = pd.DataFrame(est_list) if est_list else pd.DataFrame(columns=["Hash", "estatistica_pronta", "media_saneada", "mediana", "amostras"])
 
+    return {"Config": config_df, "TR": df_tr_export, "PNCP": df_pncp_export, "Manual": df_man_export, "Stats": df_est_export, "Historico": df_hist_export}
+
+def gerar_arquivo_exportacao(formato):
+    dfs = empacotar_projeto()
+    buffer = io.BytesIO()
+    if formato == "JSON (Recomendado)":
+        out_dict = {k: v.fillna("").to_dict(orient='records') for k, v in dfs.items()}
+        buffer.write(json.dumps(out_dict, indent=4).encode('utf-8'))
+        return buffer.getvalue(), "projeto_tr.json", "application/json"
+    elif formato == "XLSX (Excel)":
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            for k, v in dfs.items(): v.to_excel(writer, sheet_name=k, index=False)
+        return buffer.getvalue(), "projeto_tr.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif formato == "ODS (LibreOffice)":
+        with pd.ExcelWriter(buffer, engine='odf') as writer:
+            for k, v in dfs.items(): v.to_excel(writer, sheet_name=k, index=False)
+        return buffer.getvalue(), "projeto_tr.ods", "application/vnd.oasis.opendocument.spreadsheet"
+    elif formato == "CSV (ZIP)":
+        with zipfile.ZipFile(buffer, 'w') as zf:
+            for k, v in dfs.items():
+                csv_str = v.to_csv(index=False, sep=';', encoding='utf-8-sig')
+                zf.writestr(f"{k}.csv", csv_str)
+        return buffer.getvalue(), "projeto_csv.zip", "application/zip"
+
+def carregar_projeto(file):
+    dfs = {}
+    try:
+        if file.name.endswith(".json"):
+            data = json.load(file)
+            for k, v in data.items(): dfs[k] = pd.DataFrame(v)
+        elif file.name.endswith(".xlsx"): dfs = pd.read_excel(file, sheet_name=None, engine='openpyxl')
+        elif file.name.endswith(".ods"): dfs = pd.read_excel(file, sheet_name=None, engine='odf')
+        elif file.name.endswith(".zip"):
+            with zipfile.ZipFile(file, 'r') as zf:
+                for name in zf.namelist():
+                    if name.endswith('.csv'): dfs[name.replace('.csv', '')] = pd.read_csv(zf.open(name), sep=';')
+        
+        if 'Config' in dfs and not dfs['Config'].empty:
+            st.session_state['objeto_contratacao'] = str(dfs['Config'].loc[0, 'Value'])
+            st.session_state['tr_objeto_salvo'] = True
+            st.session_state['keywords_extraidas'] = extrair_palavras_chave(str(dfs['Config'].loc[0, 'Value']), 10)
+
+        if 'TR' in dfs and not dfs['TR'].empty:
+            tr_df = dfs['TR']
+            for c in ["Lote", "Item", "Descrição", "Métrica", "Tipo", "Quantidade"]:
+                if c not in tr_df.columns: tr_df[c] = ""
+            tr_df['Quantidade_Calc'] = pd.to_numeric(tr_df['Quantidade'], errors='coerce').fillna(1)
+            st.session_state['df_tr'] = tr_df.drop(columns=['Hash'], errors='ignore')
+            st.session_state['tr_itens_salvos'] = True
+
+            pncp_df = dfs.get('PNCP', pd.DataFrame())
+            man_df = dfs.get('Manual', pd.DataFrame())
+            stats_df = dfs.get('Stats', pd.DataFrame())
+            hist_df = dfs.get('Historico', pd.DataFrame())
+
+            for d in [pncp_df, man_df]:
+                if 'Válido?' in d.columns: d['Válido?'] = d['Válido?'].astype(str).str.lower().map({'true': True, '1': True, '1.0': True}).fillna(False)
+            if 'estatistica_pronta' in stats_df.columns:
+                stats_df['estatistica_pronta'] = stats_df['estatistica_pronta'].astype(str).str.lower().map({'true': True, '1': True}).fillna(False)
+
+            new_banco = {}
+            for _, row in tr_df.iterrows():
+                old_hash = row.get('Hash', gerar_hash_item(row))
+                new_hash = gerar_hash_item(row)
+
+                df_p = pncp_df[pncp_df['Hash'] == old_hash].drop(columns=['Hash']) if ('Hash' in pncp_df.columns and not pncp_df.empty) else pd.DataFrame(columns=cols_pncp)
+                df_m = man_df[man_df['Hash'] == old_hash].drop(columns=['Hash']) if ('Hash' in man_df.columns and not man_df.empty) else pd.DataFrame(columns=cols_rastreio)
+                df_h = hist_df[hist_df['Hash'] == old_hash].drop(columns=['Hash']) if ('Hash' in hist_df.columns and not hist_df.empty) else pd.DataFrame(columns=cols_historico_busca)
+                
+                df_p = df_p.reindex(columns=cols_pncp).dropna(how='all')
+                df_m = df_m.reindex(columns=cols_rastreio).dropna(how='all')
+                df_h = df_h.reindex(columns=cols_historico_busca).dropna(how='all')
+
+                stat_row = stats_df[stats_df['Hash'] == old_hash] if ('Hash' in stats_df.columns and not stats_df.empty) else pd.DataFrame()
+
+                est_pronta = bool(stat_row.iloc[0]['estatistica_pronta']) if not stat_row.empty else False
+                media_san = float(stat_row.iloc[0]['media_saneada']) if not stat_row.empty else 0.0
+                mediana = float(stat_row.iloc[0]['mediana']) if not stat_row.empty else 0.0
+                amostras = int(stat_row.iloc[0]['amostras']) if not stat_row.empty else 0
+
+                df_validos, df_outliers = pd.DataFrame(), pd.DataFrame()
+                if est_pronta:
+                    p_val = df_p.copy()
+                    m_val = pd.DataFrame()
+                    if not df_m.empty:
+                        filtro = (df_m['Preço'] > 0) & (df_m['Situação'].str.contains('Proposta recebida|Portal|Mídia|Contrataç', case=False, na=False, regex=True))
+                        df_man_v = df_m[filtro].copy()
+                        if not df_man_v.empty:
+                            df_man_v["Origem"] = df_man_v.apply(lambda r: r['Link da fonte'] if pd.notna(r.get('Link da fonte')) and str(r.get('Link da fonte')).strip() else r.get('Descrição da fonte',''), axis=1)
+                            df_man_v = df_man_v.rename(columns={"Data do Contato": "Data", "Empresa": "Empresa/Órgão"})
+                            df_man_v["Item"] = row['Descrição']
+                            df_man_v["Qtd"] = 1
+                            df_man_v["Tipo"] = "Manual"
+                            m_val = df_man_v[[c for c in cols_pncp if c in df_man_v.columns]]
+
+                    frames = []
+                    if not p_val.empty: frames.append(p_val)
+                    if not m_val.empty: frames.append(m_val)
+                    if frames:
+                        df_merge = pd.concat(frames, ignore_index=True)
+                        df_validados = df_merge[df_merge["Válido?"] == True].copy()
+                        if not df_validados.empty:
+                            df_v, df_o, _, _, _ = processar_precos_regra(df_validados, "Preços válidos - Mediana ±25% e Média")
+                            df_validos = ordenar_validos(df_v)
+                            df_outliers = ordenar_outliers(df_o)
+
+                new_banco[new_hash] = {
+                    "df_pncp": df_p, "df_manual_rastreio": df_m, "df_validacao": pd.DataFrame(columns=cols_pncp),
+                    "historico_buscas": df_h,
+                    "estatistica_pronta": est_pronta, "media_saneada": media_san, "mediana": mediana,
+                    "amostras": amostras, "df_validos": df_validos, "df_outliers": df_outliers
+                }
+            st.session_state['banco_precos'] = new_banco
+            st.session_state['acao_ativa'] = (None, None)
+            return True
+    except Exception as e:
+        st.error(f"Erro ao processar arquivo: {e}")
+        return False
+
+
+# --- 7. INTERFACE DE ABAS ---
 st.markdown("""
 <div class="tj-header">
     <div style="display:flex; align-items:center;">
@@ -298,467 +450,762 @@ st.markdown("""
             <div class="tj-logo-text" style="font-weight:400; font-size:14px;">Tribunal de Justiça do Estado de Goiás</div>
         </div>
     </div>
-    <div class="tj-sub">
-        <strong>Sistema de Apoio à Licitação</strong><br>
-        Base PNCP (Filtro Inteligente)
-    </div>
+    <div class="tj-sub"><strong>Planejamento e Cotações</strong><br>Análise de Mercado Híbrida</div>
 </div>
 <div class="hero-container">
-    <div class="hero-title">Consulta de Preços - Análise de Mercado</div>
-    <div class="hero-subtitle">Mineração com validação em cascata, curadoria técnica e composição de lotes</div>
+    <div class="hero-title">Sistema de Composição de Preços</div>
+    <div class="hero-subtitle">Mapeamento de Demanda, Busca no PNCP e Cadastramento de Cotações Manuais</div>
 </div>
 """, unsafe_allow_html=True)
 
-total_itens_carrinho = sum(len(lista) for lista in st.session_state['lotes_contratacao'].values())
-tab_pesquisa, tab_lote = st.tabs([
-    "Pesquisa Individual de Itens", 
-    f"Resumo da Contratação ({total_itens_carrinho} itens)"
+tab_tr, tab_cotacao, tab_resumo, tab_projeto, tab_bpm = st.tabs([
+    "1. Estrutura da Demanda", 
+    "2. Composição de Preços", 
+    "3. Relatório Oficial",
+    "4. Gestão de Projetos",
+    "5. Mapeamento de Processos (BPM)"
 ])
 
-with tab_pesquisa:
-    with st.form(key='search_form'):
-        col_input, col_btn = st.columns([5, 1])
-        with col_input:
-            termo = st.text_input("Qual item você deseja pesquisar?", placeholder="Ex: Monitor 24 polegadas, Papel Sulfite A4...", label_visibility="collapsed")
-        with col_btn:
-            btn_buscar = st.form_submit_button("Pesquisar")
-
-    if btn_buscar and termo:
-        engine = PNCPEngine()
-        with st.status("Localizando editais na base nacional...", expanded=True) as status:
-            editais = engine.buscar_editais(termo, paginas)
-            
-            if not editais:
-                status.update(label="Nenhum edital encontrado.", state="error")
-                st.session_state['dados_brutos'] = pd.DataFrame() 
+# ==========================================
+# ABA 1: ESTRUTURA DA DEMANDA
+# ==========================================
+with tab_tr:
+    st.markdown("### Identificação da Contratação")
+    
+    if not st.session_state['tr_objeto_salvo']:
+        st.info("💡 **Dica:** Você pode dar Ctrl+V para colar textos longos.")
+        st.session_state['objeto_contratacao'] = st.text_area("Objeto da Demanda (Descrição Global)", value=st.session_state['objeto_contratacao'], height=100)
+        c_obj_btn, _ = st.columns([1, 4])
+        if c_obj_btn.button("💾 Salvar Objeto"):
+            if st.session_state['objeto_contratacao'].strip():
+                st.session_state['tr_objeto_salvo'] = True
+                st.session_state['keywords_extraidas'] = extrair_palavras_chave(st.session_state['objeto_contratacao'], qtd_kw)
+                st.rerun()
             else:
-                st.write("Editais encontrados. Executando extração de preços (Apenas Homologados)...")
-                all_items = []
-                bar = st.progress(0)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                    futures = {executor.submit(engine.minerar_itens, ed, termo): ed for ed in editais}
-                    done = 0
-                    for f in concurrent.futures.as_completed(futures):
-                        res = f.result()
-                        if res: all_items.extend(res)
-                        done += 1
-                        bar.progress(done / len(editais))
-                bar.empty()
-                
-                if not all_items:
-                    status.update(label="Itens não encontrados com o status exigido.", state="error")
-                    st.session_state['dados_brutos'] = pd.DataFrame()
-                else:
-                    status.update(label="Mineração concluída!", state="complete")
-                    df_raw = pd.DataFrame(all_items)
-                    
-                    try:
-                        df_raw['dt'] = pd.to_datetime(df_raw['Data'], format="%d/%m/%Y", errors='coerce')
-                        limite_data = datetime.now(fuso_br) - relativedelta(months=meses_corte)
-                        df_raw['dt'] = df_raw['dt'].dt.tz_localize(fuso_br)
-                        df_pre_filtro = df_raw[(df_raw['dt'] >= limite_data)].copy()
-                        df_pre_filtro = df_pre_filtro.drop(columns=['dt'])
-                    except:
-                        df_pre_filtro = df_raw.copy()
-                    
-                    if not df_pre_filtro.empty:
-                        _, _, _, lim_inf_pre, lim_sup_pre = processar_precos_regra(df_pre_filtro, regra_calculo)
-                        if lim_inf_pre > 0 or lim_sup_pre > 0:
-                            df_pre_filtro.insert(0, "Válido?", (df_pre_filtro['Preço'] >= lim_inf_pre) & (df_pre_filtro['Preço'] <= lim_sup_pre))
-                        else:
-                            df_pre_filtro.insert(0, "Válido?", True)
-                    else:
-                        df_pre_filtro.insert(0, "Válido?", True)
-
-                    st.session_state['dados_brutos'] = df_raw
-                    st.session_state['termo_pesquisado'] = termo
-                    st.session_state['df_edicao'] = df_pre_filtro
-                    st.session_state['filter_hash'] = f"{meses_corte}_{regra_calculo}"
-                    st.session_state['step2_ready'] = False
-                    st.session_state['todos_marcados'] = True
-                    st.rerun()
-
-    if not st.session_state['dados_brutos'].empty:
-        
-        df_edicao = st.session_state['df_edicao']
-        termo_atual = st.session_state['termo_pesquisado']
-        
-        current_hash = f"{meses_corte}_{regra_calculo}"
-        if st.session_state['filter_hash'] != current_hash:
-            st.session_state['filter_hash'] = current_hash
-            st.session_state['step2_ready'] = False
+                st.error("Preencha a descrição do objeto antes de salvar.")
+    else:
+        st.info(f"**Objeto da Demanda:**\n\n{st.session_state['objeto_contratacao']}")
+        c_obj_btn, _ = st.columns([1, 4])
+        if c_obj_btn.button("✎ Editar Objeto"):
+            st.session_state['tr_objeto_salvo'] = False
+            st.rerun()
             
-            df_raw = st.session_state['dados_brutos'].copy()
-            try:
-                df_raw['dt'] = pd.to_datetime(df_raw['Data'], format="%d/%m/%Y", errors='coerce')
-                limite_data = datetime.now(fuso_br) - relativedelta(months=meses_corte)
-                df_raw['dt'] = df_raw['dt'].dt.tz_localize(fuso_br)
-                df_new = df_raw[(df_raw['dt'] >= limite_data)].copy()
-                df_new = df_new.drop(columns=['dt'])
-            except:
-                df_new = df_raw.copy()
+    st.markdown("---")
+    st.markdown("### Estrutura de Lotes e Itens")
+    if not st.session_state['tr_itens_salvos']:
+        st.caption("Cole (Ctrl+V) dados da sua planilha. **Atenção:** Apenas 'Lote' e 'Item' exigem formato numérico obrigatório.")
+        
+        df_tr_editado = st.data_editor(
+            st.session_state['df_tr'],
+            num_rows="dynamic",
+            column_config={
+                "Lote": st.column_config.NumberColumn("Lote", help="Apenas números", step=1),
+                "Item": st.column_config.NumberColumn("Item", required=True, step=1),
+                "Descrição": st.column_config.TextColumn("Descrição do Objeto", required=True, width="large"),
+                "Métrica": st.column_config.TextColumn("Métrica (Texto Livre)"),
+                "Tipo": st.column_config.TextColumn("Tipo (Texto Livre)"),
+                "Quantidade": st.column_config.TextColumn("Quantidade (Texto/Numérico)"),
+            },
+            use_container_width=True,
+            hide_index=False
+        )
+        
+        c_it_btn, _ = st.columns([1, 4])
+        if c_it_btn.button("💾 Salvar Estrutura de Itens"):
+            df_validos = df_tr_editado.dropna(subset=["Item", "Descrição"]).copy()
+            if df_validos.empty:
+                st.error("A tabela precisa ter ao menos um item válido com Número e Descrição.")
+            else:
+                df_validos['Lote'] = df_validos['Lote'].ffill()
+                df_validos['Quantidade_Calc'] = pd.to_numeric(df_validos['Quantidade'], errors='coerce').fillna(1)
                 
-            if not df_new.empty:
-                _, _, _, lim_inf_pre, lim_sup_pre = processar_precos_regra(df_new, regra_calculo)
-                if lim_inf_pre > 0 or lim_sup_pre > 0:
-                    df_new.insert(0, "Válido?", (df_new['Preço'] >= lim_inf_pre) & (df_new['Preço'] <= lim_sup_pre))
-                else:
-                    df_new.insert(0, "Válido?", True)
-            st.session_state['df_edicao'] = df_new
+                st.session_state['df_tr'] = df_validos
+                st.session_state['tr_itens_salvos'] = True
+                
+                for _, row in df_validos.iterrows():
+                    h = gerar_hash_item(row)
+                    if h not in st.session_state['banco_precos']:
+                        st.session_state['banco_precos'][h] = {
+                            "df_pncp": pd.DataFrame(columns=cols_pncp),
+                            "df_manual_rastreio": pd.DataFrame(columns=cols_rastreio),
+                            "df_validacao": pd.DataFrame(columns=cols_pncp), 
+                            "historico_buscas": pd.DataFrame(columns=cols_historico_busca),
+                            "estatistica_pronta": False,
+                            "media_saneada": 0.0,
+                            "mediana": 0.0,
+                            "amostras": 0,
+                            "df_validos": pd.DataFrame(),
+                            "df_outliers": pd.DataFrame()
+                        }
+                st.rerun()
+    else:
+        df_validos = st.session_state['df_tr'].dropna(subset=["Item", "Descrição"])
+        st.dataframe(df_validos.drop(columns=['Quantidade_Calc'], errors='ignore'), hide_index=True, use_container_width=True)
+        c_it_btn, _ = st.columns([1, 4])
+        if c_it_btn.button("✎ Editar Estrutura"):
+            st.session_state['tr_itens_salvos'] = False
             st.rerun()
 
-        if st.session_state['df_edicao'].empty:
-            st.warning("Nenhum item restou após a aplicação do filtro de período.")
-        else:
-            st.markdown("---")
-            st.markdown("### Passo 1: Validação do objeto")
-            st.write("Abaixo estão os registros localizados. Os preços discrepantes estatisticamente já foram desmarcados. Revise a lista desmarcando os itens que **não correspondem** tecnicamente à sua pesquisa.")
-            
-            st.checkbox("Selecionar todos / nenhum", value=st.session_state['todos_marcados'], key='chk_todos_ui', on_change=toggle_todos)
-            
-            with st.form("form_triagem"):
-                df_show = st.session_state['df_edicao'].copy()
-                df_show = df_show.drop(columns=['Preço'])
-                
-                df_editado = st.data_editor(
-                    df_show,
-                    column_config={
-                        "Válido?": st.column_config.CheckboxColumn("Válido?", default=True),
-                        "Valor Unitário": st.column_config.TextColumn("Valor Unitário"),
-                        "Link PNCP": st.column_config.LinkColumn("Link PNCP", display_text="Acessar PNCP")
-                    },
-                    disabled=["Data", "Órgão", "Item", "Qtd", "Valor Unitário", "Link PNCP"],
-                    hide_index=True,
-                    use_container_width=True
-                )
-                btn_validar = st.form_submit_button("Validar preço")
-            
-            if btn_validar:
-                st.session_state['df_edicao']['Válido?'] = df_editado['Válido?']
-                st.session_state['step2_ready'] = True
-                st.rerun()
-
-            if st.session_state['step2_ready']:
-                df_final = st.session_state['df_edicao']
-                df_selecionado = df_final[df_final['Válido?'] == True].copy()
-                
-                if df_selecionado.empty:
-                    st.error("Todos os itens foram desmarcados. Selecione ao menos um item.")
-                else:
-                    st.markdown("---")
-                    st.markdown("### Passo 2: Validação do preço")
-                    
-                    df_validos, df_outliers, mediana_geral, lim_inf, lim_sup = processar_precos_regra(df_selecionado, regra_calculo)
-                    df_validos = ordenar_validos(df_validos)
-                    df_outliers_sorted = ordenar_outliers(df_outliers)
-
-                    media_saneada = df_validos['Preço'].mean() if not df_validos.empty else 0
-                    mediana_saneada = df_validos['Preço'].median() if not df_validos.empty else 0
-                    menor_valido = df_validos['Preço'].min() if not df_validos.empty else 0
-                    maior_valido = df_validos['Preço'].max() if not df_validos.empty else 0
-                    
-                    menor_encontrado = df_selecionado['Preço'].min() if not df_selecionado.empty else 0
-                    maior_encontrado = df_selecionado['Preço'].max() if not df_selecionado.empty else 0
-                    total_registros = len(df_selecionado)
-                    total_uteis = len(df_validos)
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    l1_c1, l1_c2, l1_c3, l1_c4 = st.columns(4)
-                    l1_c1.markdown(f"<div class='metric-card'><div class='metric-lbl'>Média Saneada</div><div class='metric-val'>{formatar_moeda_simples(media_saneada)}</div></div>", unsafe_allow_html=True)
-                    l1_c2.markdown(f"<div class='metric-card'><div class='metric-lbl'>Mediana</div><div class='metric-val'>{formatar_moeda_simples(mediana_saneada)}</div></div>", unsafe_allow_html=True)
-                    l1_c3.markdown(f"<div class='metric-card'><div class='metric-lbl'>Menor Válido</div><div class='metric-val'>{formatar_moeda_simples(menor_valido)}</div></div>", unsafe_allow_html=True)
-                    l1_c4.markdown(f"<div class='metric-card'><div class='metric-lbl'>Maior Válido</div><div class='metric-val'>{formatar_moeda_simples(maior_valido)}</div></div>", unsafe_allow_html=True)
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    l2_c1, l2_c2, l2_c3, l2_c4 = st.columns(4)
-                    l2_c1.markdown(f"<div class='metric-card metric-card-secondary'><div class='metric-lbl'>Menor Preço Encontrado</div><div class='metric-val'>{formatar_moeda_simples(menor_encontrado)}</div></div>", unsafe_allow_html=True)
-                    l2_c2.markdown(f"<div class='metric-card metric-card-secondary'><div class='metric-lbl'>Maior Preço Encontrado</div><div class='metric-val'>{formatar_moeda_simples(maior_encontrado)}</div></div>", unsafe_allow_html=True)
-                    l2_c3.markdown(f"<div class='metric-card metric-card-secondary'><div class='metric-lbl'>Registros Selecionados</div><div class='metric-val'>{total_registros}</div></div>", unsafe_allow_html=True)
-                    l2_c4.markdown(f"<div class='metric-card metric-card-secondary'><div class='metric-lbl'>Amostras Úteis</div><div class='metric-val'>{total_uteis}</div></div>", unsafe_allow_html=True)
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    st.markdown("#### Tabela 1: Preços válidos")
-                    df_view_validos = df_validos[['Data', 'Órgão', 'Item', 'Qtd', 'Valor Unitário', 'Link PNCP']]
-                    st.dataframe(df_view_validos, column_config={"Link PNCP": st.column_config.LinkColumn("Link PNCP", display_text=None)}, use_container_width=True, hide_index=True)
-
-                    if not df_outliers_sorted.empty:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.markdown("#### Tabela 2: Preços descartados")
-                        df_view_outliers = df_outliers_sorted[['Data', 'Órgão', 'Item', 'Qtd', 'Valor Unitário', 'Link PNCP']]
-                        st.dataframe(df_view_outliers, column_config={"Link PNCP": st.column_config.LinkColumn("Link PNCP", display_text=None)}, use_container_width=True, hide_index=True)
-                    
-                    st.markdown("---")
-                    st.markdown("### Ações")
-                    
-                    data_emissao = datetime.now(fuso_br).strftime('%d/%m/%Y às %H:%M:%S')
-                    html_individual = f"""
-                    <html lang="pt-BR"><head><meta charset="UTF-8"><style>
-                        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
-                        body {{ font-family: 'Inter', sans-serif; color: #1E293B; padding: 20px; font-size:11px; }}
-                        h1 {{ color: #0F2C4C; border-bottom: 2px solid #B08D55; padding-bottom: 10px; }}
-                        .stats {{ background: #F1F5F9; padding: 15px; margin-bottom: 20px; font-size:13px; border-radius:6px; line-height: 1.6; border-left: 4px solid #B08D55;}}
-                        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }}
-                        th {{ background: #0F2C4C; color: white; padding: 8px; text-align: left; }}
-                        td {{ border: 1px solid #E2E8F0; padding: 6px; word-wrap: break-word; }}
-                        a {{ color: #003B71; text-decoration: none; font-weight: bold; }}
-                    </style></head><body>
-                        <h1>Relatório de Pesquisa de Mercado (Item Individual)</h1>
-                        <p style="text-align: right; color: #64748B;">Emitido em: {data_emissao}</p>
-                        <div class="stats">
-                            <b>Objeto:</b> {termo_atual}<br>
-                            <b>Metodologia:</b> {regra_calculo}<br>
-                            <b>Média Saneada (Ref.):</b> {formatar_moeda_simples(media_saneada)} | <b>Mediana:</b> {formatar_moeda_simples(mediana_geral)} <br>
-                            <b>Amostras Úteis:</b> {total_uteis} itens de {total_registros} selecionados.
-                        </div>
-                        <h3>Tabela 1: Preços válidos</h3>
-                        <table><thead><tr><th width="8%">Data</th><th width="15%">Órgão</th><th width="25%">Item</th><th width="12%">Preço</th><th width="30%">Link PNCP</th></tr></thead><tbody>
-                    """
-                    for _, r in df_validos.iterrows():
-                        html_individual += f"<tr><td>{r['Data']}</td><td>{r['Órgão']}</td><td>{r['Item']}</td><td>{r['Valor Unitário'].strip()}</td><td><a href='{r['Link PNCP']}'>{r['Link PNCP']}</a></td></tr>"
-                    html_individual += "</tbody></table>"
-
-                    if not df_outliers_sorted.empty:
-                        html_individual += "<h3 style='margin-top: 30px;'>Tabela 2: Preços descartados</h3><table><thead><tr><th width='8%'>Data</th><th width='15%'>Órgão</th><th width='25%'>Item</th><th width='12%'>Preço</th><th width='30%'>Link PNCP</th></tr></thead><tbody>"
-                        for _, r in df_outliers_sorted.iterrows():
-                            html_individual += f"<tr><td>{r['Data']}</td><td>{r['Órgão']}</td><td>{r['Item']}</td><td>{r['Valor Unitário'].strip()}</td><td><a href='{r['Link PNCP']}'>{r['Link PNCP']}</a></td></tr>"
-                        html_individual += "</tbody></table>"
-
-                    html_individual += "<script>window.print()</script></body></html>"
-
-                    col_acao1, col_acao2 = st.columns([1, 1])
-                    
-                    with col_acao1:
-                        with st.form("form_add_lote"):
-                            col_lote1, col_lote2, col_lote3 = st.columns([2, 2, 2])
-                            with col_lote1:
-                                qtd_item = st.number_input(f"Qtd. p/ '{termo_atual}':", min_value=1, value=1)
-                            with col_lote2:
-                                tipo_agrupamento = st.radio("Formato da Contratação:", opcoes_agrupamento, index=idx_padrao, disabled=desabilitar_agrup)
-                            with col_lote3:
-                                if tipo_agrupamento == "Agrupar em Lotes":
-                                    num_lote = st.number_input("Nº do Lote:", min_value=1, value=1)
-                                else:
-                                    st.write("") # Spacer
-                            
-                            add_lote = st.form_submit_button("➕ Salvar Item na Contratação")
-                            
-                            if add_lote:
-                                if media_saneada > 0:
-                                    nome_lote = f"Lote {num_lote}" if tipo_agrupamento == "Agrupar em Lotes" else "Sem Lote"
-                                    
-                                    if nome_lote not in st.session_state['lotes_contratacao']:
-                                        st.session_state['lotes_contratacao'][nome_lote] = []
-                                        
-                                    item_lote = {
-                                        "Objeto": termo_atual,
-                                        "Quantidade": qtd_item,
-                                        "Média Saneada": media_saneada,
-                                        "Valor Total": media_saneada * qtd_item,
-                                        "df_validos": df_validos,
-                                        "df_outliers": df_outliers_sorted,
-                                        "Amostras": total_uteis,
-                                        "dados_brutos_salvo": st.session_state['dados_brutos'].copy(),
-                                        "df_edicao_salvo": st.session_state['df_edicao'].copy(),
-                                        "html_individual": html_individual
-                                    }
-                                    st.session_state['lotes_contratacao'][nome_lote].append(item_lote)
-                                    
-                                    # Limpeza (Reset)
-                                    st.session_state['dados_brutos'] = pd.DataFrame()
-                                    st.session_state['termo_pesquisado'] = ""
-                                    st.session_state['df_edicao'] = pd.DataFrame()
-                                    st.session_state['step2_ready'] = False
-                                    
-                                    st.success(f"Item salvo em '{nome_lote}'. Área limpa para nova pesquisa.")
-                                    time.sleep(1.5)
-                                    st.rerun()
-                                else:
-                                    st.error("Não é possível salvar um item sem Média Saneada válida.")
-                    
-                    with col_acao2:
-                        st.download_button("📄 Imprimir Relatório Individual", html_individual.encode('utf-8'), f"relatorio_{termo_atual}.html", use_container_width=True)
-
-# --- ABA 2: RESUMO DA CONTRATAÇÃO (LOTES) ---
-with tab_lote:
-    if not st.session_state['lotes_contratacao']:
-        st.info("Nenhum item adicionado à contratação ainda. Realize a pesquisa individual e adicione os itens ao lote.")
+# ==========================================
+# ABA 2: COMPOSIÇÃO DE PREÇOS E VALIDAÇÃO
+# ==========================================
+with tab_cotacao:
+    if not st.session_state['tr_itens_salvos']:
+        st.warning("⚠️ Finalize e clique em 'Salvar Estrutura de Itens' na Aba 1 antes de realizar as cotações.")
     else:
-        valor_total_contratacao = 0.0
+        df_validos_tr = st.session_state['df_tr'].dropna(subset=["Item", "Descrição"])
         
-        # Ordenação inteligente (Se "Sem Lote", fica sendo único. Se numérico, ordena por número)
-        chaves_lotes = list(st.session_state['lotes_contratacao'].keys())
-        if "Sem Lote" in chaves_lotes:
-            lotes_ordenados = [("Sem Lote", st.session_state['lotes_contratacao']["Sem Lote"])]
-        else:
-            lotes_ordenados = sorted(st.session_state['lotes_contratacao'].items(), key=lambda x: int(x[0].split()[1]))
-        
-        # CABEÇALHO COMPACTO DO VALOR TOTAL NO TOPO
-        for nome_lote, itens_do_lote in lotes_ordenados:
-            for item in itens_do_lote:
-                valor_total_contratacao += item["Valor Total"]
+        st.markdown("### Painel de Ações por Item")
+        st.markdown("<div style='background-color:#0F2C4C; color:white; padding:10px; border-radius:4px; font-weight:bold; display:flex;'>", unsafe_allow_html=True)
+        c_h1, c_h2, c_h3, c_h4 = st.columns([1, 4, 1.5, 3.5])
+        c_h1.write("Item (Lote)")
+        c_h2.write("Descrição")
+        c_h3.write("Status Preço")
+        c_h4.write("Ações")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        for _, row in df_validos_tr.iterrows():
+            h_id = gerar_hash_item(row)
+            banco = st.session_state['banco_precos'].get(h_id)
+            if not banco: continue
+
+            lote_lbl = row['Lote'] if pd.notna(row['Lote']) and str(row['Lote']).strip() != "" else "Único"
+            
+            st.markdown("<div class='item-row'>", unsafe_allow_html=True)
+            c1, c2, c3, c4 = st.columns([1, 4, 1.5, 3.5])
+            c1.write(f"**{row['Item']}** ({lote_lbl})")
+            c2.write(row['Descrição'])
+            
+            if banco['estatistica_pronta']:
+                c3.markdown(f"<span style='color:green; font-weight:bold;'>✔ {formatar_moeda_simples(banco['media_saneada'])}</span>", unsafe_allow_html=True)
+            else:
+                c3.markdown("<span style='color:#64748B;'>Pendente</span>", unsafe_allow_html=True)
                 
+            with c4:
+                btn_p, btn_c, btn_v = st.columns(3)
+                if btn_p.button("🔍 PNCP", key=f"p_{h_id}", help="Buscar no PNCP", use_container_width=True):
+                    st.session_state['acao_ativa'] = ("pncp", h_id)
+                if btn_c.button("✍️ Cadastrar", key=f"c_{h_id}", help="Cotações Manuais", use_container_width=True):
+                    st.session_state['acao_ativa'] = ("manual", h_id)
+                if btn_v.button("⚖️ Validar", key=f"v_{h_id}", help="Validar tabelas isoladas", use_container_width=True):
+                    st.session_state['acao_ativa'] = ("validar", h_id)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("---")
+        
+        acao, active_hash = st.session_state['acao_ativa']
+        if acao and active_hash:
+            df_matches = df_validos_tr[df_validos_tr.apply(gerar_hash_item, axis=1) == active_hash]
+            if df_matches.empty:
+                st.session_state['acao_ativa'] = (None, None)
+                st.rerun()
+            else:
+                row_ativa = df_matches.iloc[0]
+                nome_item_ativo = row_ativa['Descrição']
+                banco_ativo = st.session_state['banco_precos'][active_hash]
+                
+                st.markdown(f"#### Área de Trabalho: {nome_item_ativo}")
+                
+                if acao == "pncp":
+                    with st.form("form_pncp_busca"):
+                        termo_sugerido = " ".join(nome_item_ativo.split()[:3])
+                        termo_pncp = st.text_input("Termos de Busca:", value=termo_sugerido)
+                        
+                        if st.form_submit_button("Iniciar Extração Inteligente"):
+                            if termo_pncp.strip():
+                                engine = PNCPEngine()
+                                status_ui = st.status("Iniciando varredura no PNCP...", expanded=True)
+                                editais, tipo = engine.buscar_editais_inteligente(termo_pncp, paginas=paginas_pncp, status_placeholder=status_ui)
+                                
+                                if editais:
+                                    status_ui.update(label=f"Editais localizados (Modo: {tipo}). Extraindo itens...", state="running")
+                                    all_items = []
+                                    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                                        futures = {executor.submit(engine.minerar_itens, ed, termo_pncp): ed for ed in editais}
+                                        for f in concurrent.futures.as_completed(futures):
+                                            res = f.result()
+                                            if res: all_items.extend(res)
+                                            
+                                    if all_items:
+                                        df_novos = pd.DataFrame(all_items)
+                                        df_novos.insert(0, "Válido?", True)
+                                        
+                                        # Incremental: Adiciona aos já existentes
+                                        banco_ativo["df_pncp"] = pd.concat([banco_ativo["df_pncp"], df_novos], ignore_index=True)
+                                        
+                                        # Log de Busca
+                                        novo_log = {
+                                            "Data/Hora": datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M"),
+                                            "Termo Pesquisado": termo_pncp,
+                                            "Novos Registros": len(all_items)
+                                        }
+                                        banco_ativo["historico_buscas"] = pd.concat([banco_ativo["historico_buscas"], pd.DataFrame([novo_log])], ignore_index=True)
+                                        
+                                        status_ui.update(label=f"Sucesso! {len(all_items)} cotações encontradas.", state="complete")
+                                        st.success(f"Foram adicionados {len(all_items)} registros à sua validação (Busca: {tipo}).")
+                                    else:
+                                        status_ui.update(label="Nenhum item correspondente dentro dos editais.", state="error")
+                                        st.error("A API retornou editais, mas a descrição interna dos itens não bateu com seus termos.")
+                                else:
+                                    status_ui.update(label="Nenhum resultado no PNCP.", state="error")
+                                    st.warning("O PNCP não retornou nada, mesmo após tentativas de busca flexível.")
+                            else:
+                                st.warning("Insira um termo para buscar.")
+                    
+                    if not banco_ativo["historico_buscas"].empty:
+                        st.markdown("##### 📜 Histórico de Buscas Realizadas")
+                        st.dataframe(banco_ativo["historico_buscas"], hide_index=True, use_container_width=True)
+
+                elif acao == "manual":
+                    with st.form("form_add_contato"):
+                        st.markdown("**Novo Registro**")
+                        c1, c2, c3 = st.columns([1.5, 1, 1.5])
+                        m_emp = c1.text_input("Empresa / Órgão Público")
+                        m_cnpj = c2.text_input("CNPJ / CPF")
+                        m_tipo_fonte = c3.selectbox("Tipo de Fonte (Art. 6º):", opcoes_origem_decreto)
+                        
+                        c4, c5 = st.columns([2, 2])
+                        m_desc_fonte = c4.text_input("Descrição da Fonte")
+                        m_link_fonte = c5.text_input("Link da Fonte (URL)")
+                        
+                        c6, c7, c8 = st.columns([1.5, 1.5, 1])
+                        m_contato = c6.text_input("Nome do Contato")
+                        m_email = c7.text_input("E-mail")
+                        m_telefone = c8.text_input("Telefone")
+                        
+                        c9, c10, c11, c12 = st.columns([1, 1, 1.5, 1.5])
+                        m_data = c9.date_input("Data do Contato", value=datetime.now(fuso_br))
+                        m_hora = c10.time_input("Horário", value=datetime.now(fuso_br).time())
+                        m_sit = c11.selectbox("Situação:", opcoes_situacao)
+                        m_preco = c12.number_input("Preço Unitário (R$)", min_value=0.00, value=0.00, step=0.01)
+                        
+                        if st.form_submit_button("Registrar Histórico"):
+                            erros = []
+                            if not m_emp.strip(): erros.append("Empresa é obrigatório.")
+                            cnpj_fmt = validar_formatar_cpf_cnpj(m_cnpj)
+                            tel_fmt = validar_formatar_telefone(m_telefone)
+                            
+                            if erros:
+                                for e in erros: st.error(e)
+                            else:
+                                novo_log = {
+                                    "Data do Contato": m_data.strftime("%d/%m/%Y"),
+                                    "Horário": m_hora.strftime("%H:%M"),
+                                    "Empresa": m_emp,
+                                    "CNPJ/CPF": cnpj_fmt if cnpj_fmt else "",
+                                    "Tipo de fonte": m_tipo_fonte,
+                                    "Descrição da fonte": m_desc_fonte,
+                                    "Link da fonte": m_link_fonte,
+                                    "Nome do Contato": m_contato,
+                                    "E-mail": m_email,
+                                    "Telefone": tel_fmt if tel_fmt else "",
+                                    "Situação": m_sit,
+                                    "Preço": float(m_preco),
+                                    "Valor Unitário": formatar_moeda_ordenavel(m_preco)
+                                }
+                                banco_ativo["df_manual_rastreio"] = pd.concat([banco_ativo["df_manual_rastreio"], pd.DataFrame([novo_log])], ignore_index=True)
+                                st.success("Adicionado!")
+                                time.sleep(0.5)
+                                st.rerun()
+                    
+                    if not banco_ativo["df_manual_rastreio"].empty:
+                        df_rastreio_view = banco_ativo["df_manual_rastreio"].drop(columns=['Valor Unitário'], errors='ignore')
+                        df_rastreio_editado = st.data_editor(
+                            df_rastreio_view,
+                            num_rows="dynamic",
+                            column_config={"Preço": st.column_config.NumberColumn("Preço (R$)", format="R$ %.2f")},
+                            use_container_width=True, hide_index=False, key=f"editor_rastreio_{active_hash}"
+                        )
+                        if not df_rastreio_editado.equals(df_rastreio_view):
+                            df_rastreio_editado['Valor Unitário'] = df_rastreio_editado['Preço'].apply(formatar_moeda_ordenavel)
+                            banco_ativo["df_manual_rastreio"] = df_rastreio_editado
+
+                elif acao == "validar":
+                    df_pncp_atual = banco_ativo["df_pncp"].copy()
+                    if not df_pncp_atual.empty:
+                        try:
+                            df_pncp_atual['dt'] = pd.to_datetime(df_pncp_atual['Data'], format="%d/%m/%Y", errors='coerce')
+                            limite_data = datetime.now(fuso_br) - relativedelta(months=meses_corte)
+                            df_pncp_atual['dt'] = df_pncp_atual['dt'].dt.tz_localize(fuso_br)
+                            df_pncp_atual = df_pncp_atual[(df_pncp_atual['dt'] >= limite_data)].copy()
+                            df_pncp_atual = df_pncp_atual.drop(columns=['dt'])
+                        except: pass
+                    
+                    df_man_full = banco_ativo["df_manual_rastreio"].copy()
+                    df_man_valido = pd.DataFrame()
+                    if not df_man_full.empty:
+                        filtro = (df_man_full['Preço'] > 0) & (df_man_full['Situação'].str.contains('Proposta recebida|Portal|Mídia|Contrataç', case=False, na=False, regex=True))
+                        df_man_valido = df_man_full[filtro].copy()
+                        if not df_man_valido.empty:
+                            df_man_valido["Origem"] = df_man_valido.apply(lambda r: r['Link da fonte'] if pd.notna(r.get('Link da fonte')) and str(r.get('Link da fonte')).strip() else r.get('Descrição da fonte',''), axis=1)
+                            df_man_valido = df_man_valido.rename(columns={"Data do Contato": "Data", "Empresa": "Empresa/Órgão"})
+                            df_man_valido["Item"] = nome_item_ativo
+                            df_man_valido["Qtd"] = 1
+                            df_man_valido["Tipo"] = "Manual"
+                            df_man_valido["Válido?"] = True
+                            df_man_valido = df_man_valido[[c for c in cols_pncp if c in df_man_valido.columns]]
+
+                    with st.form("form_validacao_dupla"):
+                        st.markdown("#### 1. Preços Editais Homologados (PNCP)")
+                        if df_pncp_atual.empty:
+                            st.info("Nenhum preço do PNCP capturado.")
+                            pncp_resultado = pd.DataFrame()
+                        else:
+                            c_t1, _ = st.columns([1, 4])
+                            sel_pncp = c_t1.radio("Selecionar PNCP:", ["Todos", "Nenhum"], index=0, horizontal=True)
+                            df_pncp_atual["Válido?"] = True if sel_pncp == "Todos" else False
+                            pncp_resultado = st.data_editor(
+                                df_pncp_atual.drop(columns=['Preço', 'Tipo']),
+                                column_config={"Válido?": st.column_config.CheckboxColumn("Válido?")},
+                                disabled=["Data", "Empresa/Órgão", "Item", "Qtd", "Valor Unitário", "Origem"],
+                                hide_index=True, use_container_width=True, key="val_pncp"
+                            )
+                            pncp_resultado["Preço"] = df_pncp_atual["Preço"]
+
+                        st.markdown("#### 2. Cotações do Histórico Manual")
+                        if df_man_valido.empty:
+                            st.info("Nenhuma proposta manual classificada com preço válido.")
+                            man_resultado = pd.DataFrame()
+                        else:
+                            c_t3, _ = st.columns([1, 4])
+                            sel_man = c_t3.radio("Selecionar Manuais:", ["Todos", "Nenhum"], index=0, horizontal=True)
+                            df_man_valido["Válido?"] = True if sel_man == "Todos" else False
+                            man_resultado = st.data_editor(
+                                df_man_valido.drop(columns=['Preço', 'Tipo']),
+                                column_config={"Válido?": st.column_config.CheckboxColumn("Válido?")},
+                                disabled=["Data", "Empresa/Órgão", "Item", "Qtd", "Valor Unitário", "Origem"],
+                                hide_index=True, use_container_width=True, key="val_man"
+                            )
+                            man_resultado["Preço"] = df_man_valido["Preço"]
+
+                        if st.form_submit_button("Calcular Mediana/Média com Preços Válidos", type="primary"):
+                            frames_to_concat = []
+                            if not pncp_resultado.empty: frames_to_concat.append(pncp_resultado)
+                            if not man_resultado.empty: frames_to_concat.append(man_resultado)
+                            
+                            if not frames_to_concat:
+                                st.error("Não há dados para calcular.")
+                            else:
+                                df_merge = pd.concat(frames_to_concat, ignore_index=True)
+                                df_validados = df_merge[df_merge["Válido?"] == True].copy()
+                                
+                                if df_validados.empty:
+                                    st.error("Você desmarcou todos os preços.")
+                                else:
+                                    df_v, df_o, m_geral, _, _ = processar_precos_regra(df_validados, regra_calculo)
+                                    banco_ativo["df_validos"] = ordenar_validos(df_v)
+                                    banco_ativo["df_outliers"] = ordenar_outliers(df_o)
+                                    banco_ativo["media_saneada"] = df_v['Preço'].mean() if not df_v.empty else 0
+                                    banco_ativo["mediana"] = m_geral
+                                    banco_ativo["amostras"] = len(df_v)
+                                    banco_ativo["estatistica_pronta"] = True
+                                    
+                                    st.success("Estatística salva com sucesso!")
+                                    time.sleep(1)
+                                    st.session_state['acao_ativa'] = (None, None)
+                                    st.rerun()
+
+                if banco_ativo["estatistica_pronta"]:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    l1_c1, l1_c2, l1_c3 = st.columns(3)
+                    l1_c1.markdown(f"<div class='metric-card'><div class='metric-lbl'>Preço Final Adotado</div><div class='metric-val'>{formatar_moeda_simples(banco_ativo['media_saneada'])}</div></div>", unsafe_allow_html=True)
+                    l1_c2.markdown(f"<div class='metric-card'><div class='metric-lbl'>Amostras Utilizadas</div><div class='metric-val'>{banco_ativo['amostras']}</div></div>", unsafe_allow_html=True)
+                    maior_v = banco_ativo["df_validos"]['Preço'].max() if not banco_ativo["df_validos"].empty else 0
+                    l1_c3.markdown(f"<div class='metric-card'><div class='metric-lbl'>Maior Valor Aceito</div><div class='metric-val'>{formatar_moeda_simples(maior_v)}</div></div>", unsafe_allow_html=True)
+
+# ==========================================
+# ABA 3: RELATÓRIO PDF NATIVO (XHTML2PDF)
+# ==========================================
+with tab_resumo:
+    if not st.session_state['tr_objeto_salvo'] or not st.session_state['tr_itens_salvos']:
+        st.warning("⚠️ Finalize o preenchimento da Aba 1 (Análise de Mercado) para visualizar o relatório.")
+    else:
+        df_validos_tr = st.session_state['df_tr'].dropna(subset=["Item", "Descrição"])
+        
+        lotes_dict = {}
+        valor_total_global = 0.0
+        
+        for _, row in df_validos_tr.iterrows():
+            lote_key = row["Lote"] if pd.notna(row["Lote"]) and str(row["Lote"]).strip() != "" else "Único"
+            if lote_key not in lotes_dict: lotes_dict[lote_key] = []
+            
+            h_id = gerar_hash_item(row)
+            banco = st.session_state['banco_precos'].get(h_id)
+            if not banco: continue
+            
+            media_item = banco['media_saneada']
+            qtd_num = row.get("Quantidade_Calc", 1)
+            subtotal_item = media_item * qtd_num
+            valor_total_global += subtotal_item
+            
+            lotes_dict[lote_key].append({
+                "Item": row["Item"],
+                "Descrição": row["Descrição"],
+                "Qtd": row["Quantidade"],
+                "Unid.": row["Métrica"],
+                "Valor Ref. Unit.": formatar_moeda_ordenavel(media_item) if media_item > 0 else "Pendente",
+                "Subtotal Estimado": formatar_moeda_ordenavel(subtotal_item) if media_item > 0 else "Pendente",
+                "Amostras": banco['amostras'],
+                "Preço Numérico": media_item 
+            })
+            
         st.markdown(f"""
         <div class='total-global-compact'>
             <div class='total-global-title'>VALOR TOTAL ESTIMADO DA CONTRATAÇÃO</div>
-            <div class='total-global-value'>{formatar_moeda_simples(valor_total_contratacao)}</div>
+            <div class='total-global-value'>{formatar_moeda_simples(valor_total_global)}</div>
         </div>
         """, unsafe_allow_html=True)
-        
-        for nome_lote, itens_do_lote in lotes_ordenados:
-            if nome_lote != "Sem Lote":
-                st.markdown(f"<h4 class='lote-header'>{nome_lote}</h4>", unsafe_allow_html=True)
             
-            tabela_lote = []
-            subtotal_lote = 0.0
+        for nome_lote, itens in lotes_dict.items():
+            cabecalho = f"Lote {nome_lote}" if nome_lote != "Único" else "Itens da Contratação"
+            st.markdown(f"<h4 class='lote-header'>📦 {cabecalho}</h4>", unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame(itens).drop(columns=['Preço Numérico']), hide_index=True, use_container_width=True)
             
-            for idx, item in enumerate(itens_do_lote):
-                tabela_lote.append({
-                    "Item": idx + 1,
-                    "Descrição": item["Objeto"],
-                    "Qtd": item["Quantidade"],
-                    "Valor Ref. Unit.": formatar_moeda_ordenavel(item["Média Saneada"]),
-                    "Valor Total Estimado": formatar_moeda_ordenavel(item["Valor Total"]),
-                    "Amostras": item["Amostras"]
-                })
-                subtotal_lote += item["Valor Total"]
+        st.markdown("---")
+        if st.button("📄 Gerar Relatório Analítico de Mercado (Download PDF)", type="primary"):
+            data_emissao = datetime.now(fuso_br).strftime('%d/%m/%Y %H:%M')
+            obj_global = str(st.session_state['objeto_contratacao'])
+            
+            html_pdf = f"""
+            <html>
+            <head>
+                <style>
+                    @page {{
+                        size: A4 portrait;
+                        margin-top: 3.5cm;
+                        margin-bottom: 2cm;
+                        margin-left: 1.5cm;
+                        margin-right: 1.5cm;
+                        @frame header_frame {{ -pdf-frame-content: header_content; left: 1.5cm; right: 1.5cm; top: 1cm; height: 2.5cm; }}
+                        @frame footer_frame {{ -pdf-frame-content: footer_content; left: 1.5cm; right: 1.5cm; bottom: 0.5cm; height: 1cm; }}
+                    }}
+                    body {{ font-family: "Times New Roman", Times, serif; font-size: 12px; color: black; line-height: 1; }}
+                    p {{ margin: 0; padding: 0; text-align: justify; }}
+                    h1, h2, h3, h4 {{ font-family: "Times New Roman", Times, serif; font-size: 12px; font-weight: bold; color: black; margin: 24px 0 6px 0; padding: 0; }}
+                    table {{ width: 100%; border-collapse: collapse; border: 0.25pt solid #666; table-layout: fixed; margin: 0; }}
+                    th, td {{ border: 0.25pt solid #666; padding: 4px; font-size: 10px; vertical-align: middle; word-wrap: break-word; }}
+                    th {{ font-weight: bold; text-align: center; background-color: #f2f2f2; }}
+                    .right-txt {{ text-align: right; font-weight: bold; }}
+                    .center-txt {{ text-align: center; }}
+                </style>
+            </head>
+            <body>
+                <div id="header_content">
+                    <table>
+                        <tr>
+                            <td rowspan="3" style="width: 35%; text-align: center; vertical-align: middle;">
+                                <span style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: bold;">PODER JUDICIÁRIO</span><br>
+                                <span style="font-family: Arial, Helvetica, sans-serif; font-size: 11px;">Tribunal de Justiça do Estado de Goiás</span><br>
+                                <span style="font-family: Arial, Helvetica, sans-serif; font-size: 9px; color: #555555;">Coordenadoria de Contratos e Aquisições de TIC</span>
+                            </td>
+                            <td colspan="3" style="width: 65%; text-align: center; font-size: 14px; font-weight: bold; vertical-align: middle;">
+                                ANÁLISE DE MERCADO
+                            </td>
+                        </tr>
+                        <tr>
+                            <td colspan="3" style="text-align: center; font-size: 12px; font-weight: bold; vertical-align: middle;">
+                                Processo de Planejamento de Aquisições e de Contratações de Soluções de TIC
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="width: 25%; text-align: center; font-size: 11px; vertical-align: middle;"><b>Revisão:</b> 008</td>
+                            <td style="width: 25%; text-align: center; font-size: 11px; vertical-align: middle;"><b>Código/Versão:</b> CCA-006</td>
+                            <td style="width: 15%; text-align: center; font-size: 11px; vertical-align: middle;"><b>Página:</b> <pdf:pagenumber> / <pdf:pagecount></td>
+                        </tr>
+                    </table>
+                </div>
                 
-            df_lote = pd.DataFrame(tabela_lote)
-            st.markdown("<div class='compact-table-container'>", unsafe_allow_html=True)
-            st.dataframe(
-                df_lote,
-                column_config={
-                    "Valor Ref. Unit.": st.column_config.TextColumn("Valor Ref. Unitário"),
-                    "Valor Total Estimado": st.column_config.TextColumn("Subtotal Estimado")
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-            
-            if nome_lote != "Sem Lote":
-                st.markdown(f"<div class='subtotal-lote'>Subtotal do {nome_lote}: {formatar_moeda_simples(subtotal_lote)}</div></div>", unsafe_allow_html=True)
-            else:
-                st.markdown("</div>", unsafe_allow_html=True)
-            
-            # Painel de Gerenciamento do Lote (Com Reordenação e Alinhamento)
-            texto_expander = f"Gerenciar Itens ({nome_lote})" if nome_lote != "Sem Lote" else "Gerenciar Itens da Contratação"
-            with st.expander(texto_expander):
-                for idx, item in enumerate(itens_do_lote):
-                    # Colunas alinhadas para os botões monocromáticos
-                    c_nome, c_up, c_down, c_ed, c_pdf, c_rm = st.columns([5, 0.5, 0.5, 1.5, 1.5, 1.5])
-                    c_nome.markdown(f"**Item {idx+1}:** {item['Objeto']} (Qtd: {item['Quantidade']})")
-                    
-                    # Setas de Reordenação
-                    if c_up.button("▲", key=f"up_{nome_lote}_{idx}", disabled=(idx == 0), use_container_width=True):
-                        itens_do_lote[idx], itens_do_lote[idx-1] = itens_do_lote[idx-1], itens_do_lote[idx]
-                        st.rerun()
-                    if c_down.button("▼", key=f"dw_{nome_lote}_{idx}", disabled=(idx == len(itens_do_lote)-1), use_container_width=True):
-                        itens_do_lote[idx], itens_do_lote[idx+1] = itens_do_lote[idx+1], itens_do_lote[idx]
-                        st.rerun()
-                    
-                    # Botões de Ação
-                    if c_ed.button("✎ Editar", key=f"ed_{nome_lote}_{idx}", use_container_width=True):
-                        st.session_state['dados_brutos'] = item['dados_brutos_salvo'].copy()
-                        st.session_state['df_edicao'] = item['df_edicao_salvo'].copy()
-                        st.session_state['termo_pesquisado'] = item['Objeto']
-                        st.session_state['step2_ready'] = True
-                        
-                        st.session_state['lotes_contratacao'][nome_lote].pop(idx)
-                        if not st.session_state['lotes_contratacao'][nome_lote]:
-                            del st.session_state['lotes_contratacao'][nome_lote]
-                        st.rerun()
-                        
-                    with c_pdf:
-                        st.download_button("📄 PDF", item['html_individual'].encode('utf-8'), f"relatorio_{item['Objeto']}.html", key=f"dl_{nome_lote}_{idx}", use_container_width=True)
-                        
-                    if c_rm.button("✖ Remover", key=f"rm_{nome_lote}_{idx}", use_container_width=True):
-                        st.session_state['lotes_contratacao'][nome_lote].pop(idx)
-                        if not st.session_state['lotes_contratacao'][nome_lote]:
-                            del st.session_state['lotes_contratacao'][nome_lote]
-                        st.rerun()
-            st.markdown("<br>", unsafe_allow_html=True)
-        
-        # --- PDF DA CONTRATAÇÃO COMPLETA ---
-        data_emissao_lote = datetime.now(fuso_br).strftime('%d/%m/%Y às %H:%M:%S')
-        html_lote = f"""
-        <html lang="pt-BR"><head><meta charset="UTF-8"><style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
-            body {{ font-family: 'Inter', sans-serif; color: #1E293B; padding: 20px; font-size:11px; }}
-            h1 {{ color: #0F2C4C; border-bottom: 2px solid #B08D55; padding-bottom: 10px; }}
-            h2 {{ color: #0F2C4C; border-bottom: 1px solid #E2E8F0; padding-bottom: 5px; margin-top: 30px; }}
-            h3 {{ color: #64748B; margin-top: 20px; }}
-            .stats {{ background: #F1F5F9; padding: 15px; margin-bottom: 20px; font-size:13px; border-radius:6px; line-height: 1.6; border-left: 4px solid #B08D55;}}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 20px; table-layout: fixed; }}
-            th {{ background: #0F2C4C; color: white; padding: 8px; text-align: left; }}
-            td {{ border: 1px solid #E2E8F0; padding: 6px; word-wrap: break-word; }}
-            .total-lote {{ font-size: 14px; font-weight: bold; color: #0F2C4C; text-align: right; padding: 5px; }}
-            .total-global {{ font-size: 20px; font-weight: 900; color: #0F2C4C; text-align: right; padding: 15px; background: #E6F2FF; margin-top: 30px; border-radius: 4px; border-left: 5px solid #0F2C4C;}}
-            a {{ color: #003B71; text-decoration: none; font-weight: bold; }}
-            .page-break {{ page-break-before: always; }}
-            .item-header {{ border-bottom: 2px solid #E2E8F0; padding-bottom: 5px; color: #B08D55; margin-top: 30px; }}
-        </style></head><body>
-            <h1>Relatório de Pesquisa de Mercado - Resumo da Contratação</h1>
-            <p style="text-align: right; color: #64748B;">Emitido em: {data_emissao_lote}</p>
-            <div class="stats">
-                <b>Metodologia Estatística Base:</b> {regra_calculo}<br>
-                <b>Total de Itens na Contratação:</b> {total_itens_carrinho}
-            </div>
-            <div class='total-global'>VALOR TOTAL ESTIMADO: {formatar_moeda_simples(valor_total_contratacao)}</div>
-        """
-        
-        for nome_lote, itens_do_lote in lotes_ordenados:
-            if nome_lote != "Sem Lote":
-                html_lote += f"<h2>Resumo: {nome_lote}</h2>"
-            else:
-                html_lote += f"<h2>Resumo da Contratação</h2>"
-                
-            html_lote += "<table><thead><tr><th width='5%'>Item</th><th width='40%'>Descrição</th><th width='10%'>Qtd</th><th width='20%'>Valor Ref. Unit.</th><th width='25%'>Subtotal</th></tr></thead><tbody>"
-            subt = 0.0
-            for idx, item in enumerate(itens_do_lote):
-                html_lote += f"<tr><td>{idx+1}</td><td>{item['Objeto']}</td><td>{item['Quantidade']}</td><td>{formatar_moeda_simples(item['Média Saneada'])}</td><td>{formatar_moeda_simples(item['Valor Total'])}</td></tr>"
-                subt += item['Valor Total']
-            
-            if nome_lote != "Sem Lote":
-                html_lote += f"</tbody></table><div class='total-lote'>Subtotal do {nome_lote}: {formatar_moeda_simples(subt)}</div>"
-            else:
-                html_lote += "</tbody></table>"
-        
-        html_lote += "<div class='page-break'></div><h1>Anexo I - Detalhamento Estatístico por Item</h1>"
-        
-        for nome_lote, itens_do_lote in lotes_ordenados:
-            if nome_lote != "Sem Lote":
-                html_lote += f"<h2 style='color: #B08D55;'>{nome_lote}</h2>"
-            for idx, item in enumerate(itens_do_lote):
-                html_lote += f"<h3 class='item-header'>Item {idx+1}: {item['Objeto']} (Qtd: {item['Quantidade']})</h3>"
-                html_lote += f"<p style='font-size:12px;'><b>Média Saneada Adotada:</b> {formatar_moeda_simples(item['Média Saneada'])} | <b>Amostras Válidas:</b> {item['Amostras']}</p>"
-                
-                html_lote += "<h4>Tabela 1: Preços válidos</h4>"
-                html_lote += "<table><thead><tr><th width='8%'>Data</th><th width='15%'>Órgão</th><th width='25%'>Item</th><th width='12%'>Preço</th><th width='30%'>Link PNCP</th></tr></thead><tbody>"
-                for _, r in item['df_validos'].iterrows():
-                    html_lote += f"<tr><td>{r['Data']}</td><td>{r['Órgão']}</td><td>{r['Item']}</td><td>{formatar_moeda_simples(r['Preço'])}</td><td><a href='{r['Link PNCP']}'>{r['Link PNCP']}</a></td></tr>"
-                html_lote += "</tbody></table>"
-                
-                if not item['df_outliers'].empty:
-                    html_lote += "<h4>Tabela 2: Preços descartados</h4>"
-                    html_lote += "<table><thead><tr><th width='8%'>Data</th><th width='15%'>Órgão</th><th width='25%'>Item</th><th width='12%'>Preço</th><th width='30%'>Link PNCP</th></tr></thead><tbody>"
-                    for _, r in item['df_outliers'].iterrows():
-                        html_lote += f"<tr><td>{r['Data']}</td><td>{r['Órgão']}</td><td>{r['Item']}</td><td>{formatar_moeda_simples(r['Preço'])}</td><td><a href='{r['Link PNCP']}'>{r['Link PNCP']}</a></td></tr>"
-                    html_lote += "</tbody></table>"
-                html_lote += "<hr style='border: 1px dashed #ccc; margin: 30px 0;'>"
+                <div id="footer_content">
+                    <p style="text-align: right; font-size: 10px;">Documento gerado eletronicamente em {data_emissao}</p>
+                </div>
 
-        html_lote += "<script>window.print()</script></body></html>"
+                <h1 style="margin-top:0;">OBJETO</h1>
+                <p>{obj_global}</p>
+                
+                <h1>METODOLOGIA</h1>
+                <p><b>Estatística Aplicada:</b> {regra_calculo}</p>
+                <p class="right-txt" style="font-size:14px; margin-top: 10px;">VALOR TOTAL ESTIMADO: {formatar_moeda_simples(valor_total_global)}</p>
+            """
+            
+            for nome_lote, itens in lotes_dict.items():
+                titulo = f"LOTE {nome_lote}" if nome_lote != "Único" else "QUADRO DE ITENS"
+                html_pdf += f"<br><h2>{titulo}</h2>"
+                html_pdf += "<table repeat-header='yes'><thead><tr><th width='5%'>Item</th><th width='40%'>Descrição</th><th width='5%'>Qtd</th><th width='10%'>Unid.</th><th width='20%'>Valor Ref. Unit.</th><th width='20%'>Subtotal</th></tr></thead><tbody>"
+                subt_lote = 0.0
+                for it in itens:
+                    try: q = float(it['Qtd']) 
+                    except: q = 1
+                    subt_item_val = it['Preço Numérico'] * q
+                    subt_lote += subt_item_val
+                    html_pdf += f"<tr><td class='center-txt'>{it['Item']}</td><td>{it['Descrição']}</td><td class='center-txt'>{it['Qtd']}</td><td class='center-txt'>{it['Unid.']}</td><td class='center-txt'>{formatar_moeda_simples(it['Preço Numérico'])}</td><td class='center-txt'>{formatar_moeda_simples(subt_item_val)}</td></tr>"
+                html_pdf += f"<tr><td colspan='5' class='right-txt'>Subtotal {titulo}:</td><td class='center-txt'><b>{formatar_moeda_simples(subt_lote)}</b></td></tr></tbody></table>"
+            
+            html_pdf += "<br><h1>ANEXO I - RELATÓRIO DE RASTREABILIDADE (ART. 6º)</h1>"
+            for _, row in df_validos_tr.iterrows():
+                h_id = gerar_hash_item(row)
+                banco = st.session_state['banco_precos'].get(h_id)
+                if not banco: continue
+                df_rastreio = banco['df_manual_rastreio']
+                
+                if not df_rastreio.empty:
+                    html_pdf += f"<h2>ITEM {row['Item']}: {row['Descrição']}</h2>"
+                    html_pdf += "<table repeat-header='yes'><thead><tr><th width='20%'>Empresa (CNPJ)</th><th width='25%'>Fonte da Pesquisa</th><th width='20%'>Contato (E-mail/Tel)</th><th width='10%'>Data/Hora</th><th width='15%'>Situação</th><th width='10%'>Preço</th></tr></thead><tbody>"
+                    for _, r_log in df_rastreio.iterrows():
+                        nome_doc = f"{r_log.get('Empresa','')}<br>{r_log.get('CNPJ/CPF','')}"
+                        fonte_base = f"<b>{str(r_log.get('Tipo de fonte',''))[:15]}</b><br>{r_log.get('Descrição da fonte', '')}"
+                        cont_doc = f"{r_log.get('Nome do Contato','')}<br>{r_log.get('E-mail','')}<br>{r_log.get('Telefone','')}"
+                        dh_doc = f"{r_log.get('Data do Contato','')}<br>{r_log.get('Horário','')}"
+                        pr = r_log.get('Preço', 0)
+                        pr_doc = formatar_moeda_simples(pr) if pr > 0 else "-"
+                        html_pdf += f"<tr><td>{nome_doc}</td><td>{fonte_base}</td><td>{cont_doc}</td><td class='center-txt'>{dh_doc}</td><td>{r_log.get('Situação','')}</td><td class='center-txt'>{pr_doc}</td></tr>"
+                    html_pdf += "</tbody></table>"
 
-        col_acao1, col_acao2 = st.columns([1, 1])
-        with col_acao1:
-            st.download_button("📄 Imprimir Relatório Completo", html_lote.encode('utf-8'), "relatorio_contratacao.html", type="primary", use_container_width=True)
-        with col_acao2:
-            if st.button("✖ Limpar Todos os Lotes", use_container_width=True):
-                st.session_state['lotes_contratacao'] = {}
-                st.rerun()
+            html_pdf += "<br><h1>ANEXO II - COMPOSIÇÃO ESTATÍSTICA FINAL</h1>"
+            for _, row in df_validos_tr.iterrows():
+                h_id = gerar_hash_item(row)
+                banco = st.session_state['banco_precos'].get(h_id)
+                if not banco: continue
+                
+                html_pdf += f"<h2>ITEM {row['Item']}: {row['Descrição']}</h2>"
+                html_pdf += f"<p><b>Média Saneada Aplicada:</b> {formatar_moeda_simples(banco['media_saneada'])} | <b>Amostras Válidas:</b> {banco['amostras']}</p>"
+                
+                df_v = banco['df_validos']
+                if not df_v.empty:
+                    html_pdf += "<h2>Preços Válidos Adotados no Cálculo</h2>"
+                    html_pdf += "<table repeat-header='yes'><thead><tr><th width='12%'>Data</th><th width='30%'>Empresa/Órgão</th><th width='18%'>Valor Unit.</th><th width='40%'>Origem (Fundamento)</th></tr></thead><tbody>"
+                    for _, r in df_v.iterrows():
+                        orig_str = str(r['Origem'])[:150] + "..." if len(str(r['Origem'])) > 150 else str(r['Origem'])
+                        html_pdf += f"<tr><td class='center-txt'>{r['Data']}</td><td>{r['Empresa/Órgão']}</td><td class='center-txt'>{formatar_moeda_simples(r['Preço'])}</td><td>{orig_str}</td></tr>"
+                    html_pdf += "</tbody></table>"
+                    
+                df_o = banco['df_outliers']
+                if not df_o.empty:
+                    html_pdf += "<h2>Preços Descartados (Outliers ou Desmarcados Manualmente)</h2>"
+                    html_pdf += "<table repeat-header='yes'><thead><tr><th width='12%'>Data</th><th width='30%'>Empresa/Órgão</th><th width='18%'>Valor Unit.</th><th width='40%'>Origem (Fundamento)</th></tr></thead><tbody>"
+                    for _, r in df_o.iterrows():
+                        orig_str = str(r['Origem'])[:150] + "..." if len(str(r['Origem'])) > 150 else str(r['Origem'])
+                        html_pdf += f"<tr><td class='center-txt'>{r['Data']}</td><td>{r['Empresa/Órgão']}</td><td class='center-txt'>{formatar_moeda_simples(r['Preço'])}</td><td>{orig_str}</td></tr>"
+                    html_pdf += "</tbody></table>"
+            
+            html_pdf += "</body></html>"
+            
+            result_pdf = io.BytesIO()
+            pdf = pisa.CreatePDF(src=html_pdf, dest=result_pdf, encoding='utf-8')
+            
+            if not pdf.err:
+                st.download_button(
+                    label="📥 Baixar Arquivo PDF Oficial",
+                    data=result_pdf.getvalue(),
+                    file_name="Analise_de_Mercado_Oficial.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    use_container_width=True
+                )
+            else:
+                st.error("Erro interno ao gerar o PDF.")
+
+# ==========================================
+# ABA 4: GESTÃO DE PROJETO
+# ==========================================
+with tab_projeto:
+    st.markdown("### Salvar / Exportar Projeto")
+    fmt_export = st.selectbox("Formato de Exportação:", ["JSON (Recomendado)", "XLSX (Excel)", "ODS (LibreOffice)", "CSV (ZIP)"])
+    if st.button("Gerar Arquivo de Backup"):
+        with st.spinner("Empacotando dados do projeto..."):
+            data, filename, mime = gerar_arquivo_exportacao(fmt_export)
+            st.download_button("📥 Baixar Arquivo de Projeto", data=data, file_name=filename, mime=mime, type="primary")
+            
+    st.markdown("---")
+    st.markdown("### Carregar / Importar Projeto")
+    up_file = st.file_uploader("Arraste seu arquivo de backup (.json, .xlsx, .ods, .zip)", type=["json", "xlsx", "ods", "zip"])
+    if up_file:
+        if st.button("Carregar Projeto"):
+            with st.spinner("Restaurando ambiente..."):
+                sucesso = carregar_projeto(up_file)
+                if sucesso:
+                    st.success("Projeto restaurado com sucesso!")
+                    time.sleep(1)
+                    st.rerun()
+
+# ==========================================
+# ABA 5: MAPEAMENTO DE PROCESSOS (BPM) E BPMN VISUAL
+# ==========================================
+with tab_bpm:
+    st.markdown("### Modelador Visual (BPMN 2.0)")
+    st.caption("Você pode arrastar, conectar, criar novas tarefas e salvar este desenho em SVG ou BPMN utilizando a barra inferior.")
+    
+    # XML com caixas LARGAS (150px) para acomodar os textos corretamente sem quebrar as bordas
+    bpmn_xml_padrao = """<?xml version="1.0" encoding="UTF-8"?>
+    <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" id="Definitions_1" targetNamespace="http://bpmn.io/schema/bpmn">
+      <bpmn:process id="Process_1" isExecutable="false">
+        <bpmn:startEvent id="StartEvent_1" name="Início">
+          <bpmn:outgoing>Flow_1</bpmn:outgoing>
+        </bpmn:startEvent>
+        <bpmn:task id="Task_1" name="Identificação da Contratação">
+          <bpmn:incoming>Flow_1</bpmn:incoming>
+          <bpmn:outgoing>Flow_2</bpmn:outgoing>
+        </bpmn:task>
+        <bpmn:sequenceFlow id="Flow_1" sourceRef="StartEvent_1" targetRef="Task_1" />
+        <bpmn:task id="Task_2" name="Estruturação de Lotes">
+          <bpmn:incoming>Flow_2</bpmn:incoming>
+          <bpmn:outgoing>Flow_3</bpmn:outgoing>
+        </bpmn:task>
+        <bpmn:sequenceFlow id="Flow_2" sourceRef="Task_1" targetRef="Task_2" />
+        <bpmn:task id="Task_3" name="Extração PNCP">
+          <bpmn:incoming>Flow_3</bpmn:incoming>
+          <bpmn:outgoing>Flow_4</bpmn:outgoing>
+        </bpmn:task>
+        <bpmn:sequenceFlow id="Flow_3" sourceRef="Task_2" targetRef="Task_3" />
+        <bpmn:task id="Task_4" name="Cotação Direta">
+          <bpmn:incoming>Flow_4</bpmn:incoming>
+          <bpmn:outgoing>Flow_5</bpmn:outgoing>
+        </bpmn:task>
+        <bpmn:sequenceFlow id="Flow_4" sourceRef="Task_3" targetRef="Task_4" />
+        <bpmn:task id="Task_5" name="Validação Estatística">
+          <bpmn:incoming>Flow_5</bpmn:incoming>
+          <bpmn:outgoing>Flow_6</bpmn:outgoing>
+        </bpmn:task>
+        <bpmn:sequenceFlow id="Flow_5" sourceRef="Task_4" targetRef="Task_5" />
+        <bpmn:task id="Task_6" name="Geração Relatório PDF">
+          <bpmn:incoming>Flow_6</bpmn:incoming>
+          <bpmn:outgoing>Flow_7</bpmn:outgoing>
+        </bpmn:task>
+        <bpmn:sequenceFlow id="Flow_6" sourceRef="Task_5" targetRef="Task_6" />
+        <bpmn:endEvent id="EndEvent_1" name="Fim">
+          <bpmn:incoming>Flow_7</bpmn:incoming>
+        </bpmn:endEvent>
+        <bpmn:sequenceFlow id="Flow_7" sourceRef="Task_6" targetRef="EndEvent_1" />
+      </bpmn:process>
+      <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+        <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_1">
+          <bpmndi:BPMNShape id="_BPMNShape_StartEvent_2" bpmnElement="StartEvent_1">
+            <dc:Bounds x="152" y="102" width="36" height="36" />
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="Task_1_di" bpmnElement="Task_1">
+            <dc:Bounds x="240" y="80" width="150" height="80" />
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="Task_2_di" bpmnElement="Task_2">
+            <dc:Bounds x="440" y="80" width="150" height="80" />
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="Task_3_di" bpmnElement="Task_3">
+            <dc:Bounds x="640" y="80" width="150" height="80" />
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="Task_4_di" bpmnElement="Task_4">
+            <dc:Bounds x="840" y="80" width="150" height="80" />
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="Task_5_di" bpmnElement="Task_5">
+            <dc:Bounds x="1040" y="80" width="150" height="80" />
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="Task_6_di" bpmnElement="Task_6">
+            <dc:Bounds x="1240" y="80" width="150" height="80" />
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="EndEvent_1_di" bpmnElement="EndEvent_1">
+            <dc:Bounds x="1440" y="102" width="36" height="36" />
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNEdge id="Flow_1_di" bpmnElement="Flow_1">
+            <di:waypoint x="188" y="120" />
+            <di:waypoint x="240" y="120" />
+          </bpmndi:BPMNEdge>
+          <bpmndi:BPMNEdge id="Flow_2_di" bpmnElement="Flow_2">
+            <di:waypoint x="390" y="120" />
+            <di:waypoint x="440" y="120" />
+          </bpmndi:BPMNEdge>
+          <bpmndi:BPMNEdge id="Flow_3_di" bpmnElement="Flow_3">
+            <di:waypoint x="590" y="120" />
+            <di:waypoint x="640" y="120" />
+          </bpmndi:BPMNEdge>
+          <bpmndi:BPMNEdge id="Flow_4_di" bpmnElement="Flow_4">
+            <di:waypoint x="790" y="120" />
+            <di:waypoint x="840" y="120" />
+          </bpmndi:BPMNEdge>
+          <bpmndi:BPMNEdge id="Flow_5_di" bpmnElement="Flow_5">
+            <di:waypoint x="990" y="120" />
+            <di:waypoint x="1040" y="120" />
+          </bpmndi:BPMNEdge>
+          <bpmndi:BPMNEdge id="Flow_6_di" bpmnElement="Flow_6">
+            <di:waypoint x="1190" y="120" />
+            <di:waypoint x="1240" y="120" />
+          </bpmndi:BPMNEdge>
+          <bpmndi:BPMNEdge id="Flow_7_di" bpmnElement="Flow_7">
+            <di:waypoint x="1390" y="120" />
+            <di:waypoint x="1440" y="120" />
+          </bpmndi:BPMNEdge>
+        </bpmndi:BPMNPlane>
+      </bpmndi:BPMNDiagram>
+    </bpmn:definitions>"""
+
+    html_modeler = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8" />
+      <link rel="stylesheet" href="https://unpkg.com/bpmn-js@14.0.0/dist/assets/diagram-js.css" />
+      <link rel="stylesheet" href="https://unpkg.com/bpmn-js@14.0.0/dist/assets/bpmn-js.css" />
+      <link rel="stylesheet" href="https://unpkg.com/bpmn-js@14.0.0/dist/assets/bpmn-font/css/bpmn.css" />
+      <style>
+        html, body {{ height: 100%; margin: 0; padding: 0; font-family: sans-serif; }}
+        #canvas {{ height: 90vh; width: 100%; border: 1px solid #ccc; background-color: white; }}
+        .bjs-powered-by {{ display: none; }}
+        .djs-label {{ font-family: Arial, sans-serif !important; font-size: 12px !important; line-height: 1.2 !important; }}
+        .toolbar {{ height: 10vh; display: flex; align-items: center; justify-content: center; background-color: #F8FAFC; gap: 15px; border: 1px solid #ccc; border-top: none; }}
+        button {{ background-color: #0F2C4C; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; }}
+        button:hover {{ background-color: #0B223D; }}
+      </style>
+    </head>
+    <body>
+      <div id="canvas"></div>
+      <div class="toolbar">
+          <button onclick="downloadSVG()">Baixar Diagrama (SVG)</button>
+          <button onclick="downloadBPMN()">Baixar Diagrama (BPMN)</button>
+      </div>
+      
+      <script src="https://unpkg.com/bpmn-js@14.0.0/dist/bpmn-modeler.development.js"></script>
+      <script>
+        var bpmnModeler = new BpmnJS({{
+          container: '#canvas',
+          keyboard: {{ bindTo: window }}
+        }});
+
+        var bpmnXML = `{bpmn_xml_padrao}`;
+
+        bpmnModeler.importXML(bpmnXML).then(function(result) {{
+            bpmnModeler.get('canvas').zoom('fit-viewport');
+        }}).catch(function(err) {{
+            console.error('Falha ao renderizar BPMN', err);
+        }});
+
+        function downloadSVG() {{
+            bpmnModeler.saveSVG({{ format: true }}).then(function(result) {{
+                var blob = new Blob([result.svg], {{ type: 'image/svg+xml' }});
+                var url = window.URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = 'Mapeamento_Processo_Mercado.svg';
+                a.click();
+            }});
+        }}
+
+        function downloadBPMN() {{
+            bpmnModeler.saveXML({{ format: true }}).then(function(result) {{
+                var blob = new Blob([result.xml], {{ type: 'application/bpmn20-xml' }});
+                var url = window.URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = 'Mapeamento_Processo_Mercado.bpmn';
+                a.click();
+            }});
+        }}
+      </script>
+    </body>
+    </html>
+    """
+    
+    components.html(html_modeler, height=700)
 
 # --- FOOTER ---
 st.markdown("""
 <div class="tj-footer">
     © 2026 Poder Judiciário do Estado de Goiás<br>
-    Sistema de Apoio à Instrução Processual - Dados Públicos
+    Sistema de Apoio ao Planejamento da Contratação (Fase Interna)
 </div>
 """, unsafe_allow_html=True)
