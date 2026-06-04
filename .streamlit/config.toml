@@ -1,0 +1,17 @@
+[client]
+showErrorDetails = true
+toolbarMode = "developer"
+
+[server]
+headless = true
+port = 8501
+address = "0.0.0.0"
+enableXsrfProtection = false
+enableCORS = true
+enableWebsocketCompression = false
+
+[browser]
+gatherUsageStats = false
+
+[logger]
+level = "info"

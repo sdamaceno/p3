@@ -1,0 +1,35 @@
+*   Trying 189.9.176.245:443...
+* Connected to pncp.gov.br (189.9.176.245) port 443 (#0)
+* ALPN: offers h2,http/1.1
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+*  CAfile: /etc/ssl/certs/ca-certificates.crt
+*  CApath: /etc/ssl/certs
+* TLSv1.3 (IN), TLS handshake, Server hello (2):
+* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+* TLSv1.3 (IN), TLS handshake, Certificate (11):
+* TLSv1.3 (IN), TLS handshake, CERT verify (15):
+* TLSv1.3 (IN), TLS handshake, Finished (20):
+* TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
+* TLSv1.3 (OUT), TLS handshake, Finished (20):
+* SSL connection using TLSv1.3 / TLS_CHACHA20_POLY1305_SHA256
+* ALPN: server did not agree on a protocol. Uses default.
+* Server certificate:
+*  subject: CN=pncp.gov.br
+*  start date: May 21 20:15:26 2026 GMT
+*  expire date: Aug 19 20:15:25 2026 GMT
+*  subjectAltName: host "pncp.gov.br" matched cert's "pncp.gov.br"
+*  issuer: C=US; O=Let's Encrypt; CN=R13
+*  SSL certificate verify ok.
+* using HTTP/1.x
+> GET /api/search/?q=computador&pagina=1&tam_pagina=50&ordenacao=-dataPublicacaoPncp&tipos_documento=edital HTTP/1.1
+> Host: pncp.gov.br
+> User-Agent: Mozilla/5.0
+> Accept: application/json
+> Referer: https://pncp.gov.br/app/editais
+> Origin: https://pncp.gov.br
+> 
+* Recv failure: Connection reset by peer
+* OpenSSL SSL_read: Connection reset by peer, errno 104
+* Closing connection 0
+* Send failure: Broken pipe
+curl: (56) Recv failure: Connection reset by peer
