@@ -17,7 +17,7 @@ def carregar_estilos():
             background-color: {BG_MAIN}; 
         }}
         
-        h1, h2, h3, h4, h5 {{ font-weight: 700; letter-spacing: -0.5px; }}
+        h1, h2, h3, h4, h5 {{ font-weight: 700; letter-spacing: -0.5px; margin-bottom: 4px; }}
         footer {{visibility: hidden; display: none;}}
         
         /* Layout de Tela Cheia Controlada */
@@ -56,9 +56,7 @@ def carregar_estilos():
         [data-testid="stFileUploader"] > section button,
         [data-testid="stFileUploader"] > section small,
         [data-testid="stFileUploader"] > section span,
-        [data-testid="stFileUploader"] > section svg {{
-            display: none !important;
-        }}
+        [data-testid="stFileUploader"] > section svg {{ display: none !important; }}
         
         [data-testid="stFileUploader"] > section::after {{
             content: 'Enviar' !important;
@@ -67,30 +65,33 @@ def carregar_estilos():
             font-size: 14px !important;
         }}
         
-        /* Hierarquia Visual Restrita por CSS */
+        /* Cabeçalho Limpo SAM */
+        .sam-header {{ background: #FFFFFF; padding: 20px 2rem; margin-top: -1rem; margin-left: -2rem; margin-right: -2rem; border-bottom: 1px solid #E2E8F0; box-shadow: 0 2px 4px -1px rgba(0,0,0,0.05); margin-bottom: 25px; text-align: center; }}
+        .sam-title {{ font-weight: 800; font-size: 24px; color: var(--tj-blue); letter-spacing: -0.5px; }}
+        
+        /* Redução de espaçamentos para compactação máxima */
+        .stButton > button {{ background-color: var(--tj-blue); color: white; border: none; border-radius: 4px; font-weight: 600; width: 100%; padding: 4px 10px; min-height: 35px; transition: background-color 0.2s ease; }}
+        .stButton > button:hover {{ background-color: #0B223D; color: white; }}
+        
+        div[data-testid="column"] {{ padding-bottom: 0px !important; }}
+        
         .tit-contratacao h3 {{ color: var(--tj-blue); font-weight: 800; font-size: 20px; margin-bottom: 5px; }}
         .tit-grupo h4 {{ color: var(--tj-blue) !important; font-weight: 700 !important; font-size: 15px !important; margin: 0px !important; padding: 0px !important; }}
         
-        .section-title {{ font-size: 14px; font-weight: 700; color: #1E293B; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .section-title {{ font-size: 13px; font-weight: 700; color: #64748B; margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.5px; }}
         .lbl-upload {{ font-size: 14px; color: #1E293B; margin-bottom: 8px; font-weight: 600; }}
         
-        .metric-card {{ background: white; border: 1px solid #E2E8F0; border-radius: 6px; padding: 10px; text-align: center; border-top: 4px solid var(--tj-gold); display: flex; flex-direction: column; justify-content: center; transition: transform 0.2s ease; }}
-        .metric-card:hover {{ transform: translateY(-2px); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }}
+        .metric-card {{ background: white; border: 1px solid #E2E8F0; border-radius: 6px; padding: 10px; text-align: center; border-top: 4px solid var(--tj-gold); display: flex; flex-direction: column; justify-content: center; }}
         .metric-val {{ font-size: 18px; font-weight: 800; color: var(--tj-blue); letter-spacing: -0.5px; }}
         .metric-lbl {{ font-size: 10px; color: #64748B; text-transform: uppercase; margin-bottom: 2px; font-weight: 700; }}
-        
-        .stButton > button {{ background-color: var(--tj-blue); color: white; border: none; border-radius: 4px; font-weight: 600; width: 100%; padding: 4px 10px; min-height: 38px; transition: background-color 0.2s ease; }}
-        .stButton > button:hover {{ background-color: #0B223D; color: white; }}
         
         .total-global-compact {{ background-color: #E6F2FF; padding: 10px 20px; border-radius: 4px; border-left: 4px solid {TJ_BLUE}; display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; margin-top: 5px; }}
         .total-global-title {{ margin: 0; color: {TJ_BLUE}; font-size: 14px; font-weight: 800; text-transform: uppercase; }}
         .total-global-value {{ margin: 0; color: {TJ_BLUE}; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }}
         
-        .item-row {{ border-bottom: 1px solid #E2E8F0; padding: 6px 0; display: flex; align-items: center; font-size: 14px; }}
+        .item-row {{ border-bottom: 1px solid #E2E8F0; padding: 4px 0; margin-bottom: 2px; display: flex; align-items: center; font-size: 13px; }}
         
         @media (max-width: 768px) {{
-            .tj-header {{ flex-direction: column; align-items: flex-start; gap: 10px; }}
-            .tj-sub {{ border-left: none; padding-left: 0; margin-left: 0; border-top: 1px solid #CBD5E1; padding-top: 5px; }}
             .total-global-compact {{ flex-direction: column; align-items: flex-start; gap: 5px; }}
         }}
     </style>
@@ -98,18 +99,8 @@ def carregar_estilos():
 
 def renderizar_cabecalho():
     st.markdown(f"""
-    <div class="tj-header">
-        <div style="display:flex; align-items:center;">
-            <div>
-                <div class="tj-logo-text">PODER JUDICIÁRIO</div>
-                <div class="tj-logo-text" style="font-weight:400; font-size:12px;">{get_text("NOME_ORGAO")}</div>
-            </div>
-        </div>
-        <div class="tj-sub">{get_text("SUBTITULO_HEADER")}</div>
-    </div>
-    <div class="hero-container">
-        <div class="hero-title">{get_text("NOME_SISTEMA")}</div>
-        <div class="hero-subtitle">{get_text("SUBTITULO_HERO")}</div>
+    <div class="sam-header">
+        <div class="sam-title">{get_text("NOME_SISTEMA")}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -128,8 +119,8 @@ def renderizar_total_global(valor_formatado):
     """, unsafe_allow_html=True)
 
 def renderizar_cabecalho_lista_itens():
-    st.markdown("<div style='background-color:#0F2C4C; color:white; padding:8px; border-radius:4px; font-weight:bold; display:flex; font-size: 14px;'>", unsafe_allow_html=True)
-    c_h1, c_h2, c_h3, c_h4 = st.columns([1, 4, 1.5, 3.5])
+    st.markdown("<div style='background-color:#0F2C4C; color:white; padding:6px 8px; border-radius:4px; font-weight:bold; display:flex; font-size: 13px; margin-bottom: 8px;'>", unsafe_allow_html=True)
+    c_h1, c_h2, c_h3, c_h4 = st.columns([1, 4, 1.5, 3], gap="small")
     c_h1.write(get_text("COL_LOTE"))
     c_h2.write(get_text("COL_DESC"))
     c_h3.write(get_text("COL_STATUS"))

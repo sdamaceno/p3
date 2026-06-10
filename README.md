@@ -38,7 +38,7 @@ streamlit run app.py
 
 Em atualizações, pode ser necessário alguns comandos (principalmente se estiver no ambiente do VS Code):
 
-Vá no terminal do VS Code onde o Streamlit está rodando, pressione **Ctrl + C** para parar a aplicação. Depois, inicie novamente com:
+Vá no terminal do VS Code onde o Streamlit está rodando, pressione `Ctrl + C` para parar a aplicação. Depois, inicie novamente com:
 
 ```bash
 streamlit run app.py
@@ -46,7 +46,7 @@ streamlit run app.py
 
 Verifique também a visibilidade da porta da aplicação.
 
-No painel inferior do VS Code, vá na aba "Ports" (Portas), encontre a porta **8501**, clique com o botão direito na coluna "Visibility" (Visibilidade) e mude de "Private" (Privada) para "Public" (Pública).
+No painel inferior do VS Code, vá na aba "Ports" (Portas), encontre a porta `8501`, clique com o botão direito na coluna "Visibility" (Visibilidade) e mude de "Private" (Privada) para "Public" (Pública).
 
 Atualize a página e o sistema voltará a aparecer instantaneamente.
 
@@ -68,24 +68,28 @@ streamlit run app.py --server.enableCORS false --server.enableXsrfProtection fal
 * **Multithreading & Concorrência:** `concurrent.futures` com limitação de workers para paralelismo seguro na extração de dados do PNCP.
 * **Integração de APIs:** Requests (Buscas no PNCP) com `urllib.parse` para parametrização de URLs de auditoria.
 * **Geração de PDF:** `xhtml2pdf` (conversão direta de HTML/CSS para PDF de forma nativa e estrita).
-* **Internacionalização (i18n):** Arquivo Python centralizado (`texts.py`) atuando como dicionário global de interface e motor de conversão de tipagem local (ex: conversão de números "15.000,50" para floats do padrão norte-americano sem uso de colunas auxiliares).
+* **Internacionalização (i18n):** Arquivo Python centralizado (`texts.py`) atuando como dicionário global de interface e motor de conversão de tipagem local.
+* **Design System (UI/UX):** Padronização extrema através de módulos segregados (`typography.py`, `layout.py`, `components.py`) garantindo tipografia unificada (12pt), elementos modulares reutilizáveis e eliminação de hardcodes visuais.
 
-## 🏗️ 4. Arquitetura de Arquivos (Padrão MVC Lógico)
-A aplicação segue o princípio de responsabilidade única (SOLID), dividida nos seguintes arquivos base:
+## 🏗️ 4. Arquitetura de Arquivos (Padrão MVC Lógico & Design System)
+A aplicação segue o princípio de responsabilidade única (SOLID) e modularização de UI, dividida nos seguintes arquivos base:
 * `app.py` **(Controller)**: Roteador principal baseado em `st.session_state` (Máquinas de Estado). Controla o fluxo de dados, a arquitetura multi-contratação, buscas assíncronas e renderização condicional.
-* `texts.py` **(Dictionary/i18n)**: Arquivo central de textos e formatos monetários/decimais. Nenhuma string é colocada de forma *hardcoded* nas views.
-* `ui.py` **(View)**: Concentra a identidade visual (CSS injetado hackeando componentes nativos do Streamlit, como botões de upload) e funções de renderização de componentes de alto nível.
+* `texts.py` **(Dictionary/i18n)**: Arquivo central de textos e formatos monetários/decimais. Nenhuma string é colocada de forma *hardcoded* nas views. Emojis são estritamente abolidos do sistema.
+* `typography.py` **(Design System - Typography)**: Definições de fontes, pesos e padronização global de tamanho de texto (12pt).
+* `layout.py` **(Design System - Layout)**: Estruturas de containers, colunas, headers e espaçamentos globais (max-width: 1600px).
+* `components.py` **(Design System - Elements)**: Wrappers de botões, inputs, toggles e tabelas. Centraliza a estilização de componentes interativos (ex: Dropzone convertido em botão primário).
 * `pncp_api.py` **(Model)**: Motor de extração semântica e comunicação com a API do Portal Nacional de Contratações Públicas.
 * `estatistica.py` **(Model)**: Motor de cálculo e saneamento estatístico (Mediana, Outliers).
 * `pdf_engine.py` **(View/Export)**: Renderização isolada HTML/CSS do Relatório Oficial e da Trilha de Auditoria.
 * `utils.py` **(Helper)**: Funções globais de formatação, regex, hashing de identificação e parser numérico localizado.
 
 ## ⚙️ 5. Módulos e Fluxo de Uso
-A estrutura operacional aboliu o uso de "abas" (tabs). O sistema agora permite criar contratações infinitas geridas em série (Contratação 1, Contratação 2...), renomeáveis em tempo real. Cada contratação possui três grupos lógicos colapsáveis (`st.expander`):
+A estrutura operacional aboliu o uso de "abas" (tabs). O sistema agora permite criar contratações infinitas geridas em série (Contratação 1, Contratação 2...), renomeáveis em tempo real. Cada contratação possui três grupos lógicos colapsáveis (`st.toggle` mimetizando comportamento de collapse):
 
 * **Grupo 1: Objeto (Estrutura da Demanda):**
   * **Colagem Inteligente (Smart Paste):** O usuário cola o Termo de Referência inteiro (prosa seguida da tabela do Excel/Word). O sistema detecta os delimitadores de tabulação (`\t`), separa o texto corrido (inserindo em "Objeto") e converte a matriz na "Tabela de Itens".
   * **Upload Otimizado:** Botão de upload redesenhado via CSS para atuar lado a lado com os comandos de salvamento, ocultando meta-instruções nativas. As áreas de input somem ao salvar, exibindo apenas a tabela final de forma limpa.
+  * **Extração Inteligente (PDF/DOCX):** O sistema varre nativamente PDFs, DOCXs e ODTs carregados, buscando a chave semântica `1. OBJETO`. Ele isola e importa automaticamente a descrição exata da demanda, ignorando parágrafos irrelevantes e indexando automaticamente qualquer estrutura em tabela detectada logo abaixo, garantindo uma importação "Zero-Click". Requer as bibliotecas `pdfplumber` e `python-docx`.
 
 * **Grupo 2: Análise de Mercado:**
   * Painel de filtros reposicionado (Regra de cálculo, meses de corte, páginas e **Delay Anti-Bot**).
@@ -106,9 +110,9 @@ Qualquer desenvolvedor ou agente de IA que atue neste repositório deve obedecer
 1. **Regra de Escopo (MVC):** Alterar APENAS o arquivo/módulo correspondente à nova feature. É expressamente proibido refatorar outras camadas sem solicitação.
 2. **REGRA DOS DADOS REAIS:** JAMAIS EXIBA DADOS SIMULADOS!!! O sistema é uma ferramenta jurídica governamental e deve operar exclusivamente com dados reais do mercado ou da API do PNCP.
 3. **Trava de Estilização do PDF:** As regras do `xhtml2pdf` em `pdf_engine.py` são críticas. É expressamente proibido o uso da tag `<pdf:nextpage />` (utilizar `page-break-before: always;`). Não quebrar as diretrizes de quebra de página (`page-break-inside`).
-4. **Controle de Textos (i18n):** Nenhuma string deve ser inserida "hardcoded" na interface. Tudo deve ser mapeado no dicionário em `texts.py`.
-5. **Usabilidade e Responsividade Extremas:** O layout deve usar toda a largura disponível (até 1600px de limite estético), garantindo a responsividade fluida (`use_container_width`). As tabelas **não podem gerar barras horizontais nativas** em telas ultrawide.
-6. **Protocolo de Entrega do LLM:** Todo arquivo alterado em Python deve ser fornecido por completo em um único bloco de código. O uso de *snippets* (fragmentos parciais) para Python é estritamente proibido para mitigar quebras de indentação.
+4. **Controle de Textos (i18n):** Nenhuma string deve ser inserida "hardcoded" na interface. Tudo deve ser mapeado no dicionário em `texts.py`. O uso de Emojis é ESTRITAMENTE PROIBIDO em toda a aplicação.
+5. **Usabilidade, Responsividade e Tipografia:** O layout deve usar toda a largura disponível (até 1600px de limite estético), garantindo a responsividade fluida (`use_container_width`). As tabelas não podem gerar barras horizontais nativas em telas ultrawide. Todos os elementos textuais e componentes de UI devem herdar a base tipográfica global definida em 12pt (`typography.py`).
+6. **Modularidade UI (Design System):** Novos elementos de tela (botões, inputs, expansores) não devem ser instanciados com estilos literais nas views. Todo novo componente deve possuir seu wrapper padronizado no `components.py` e layout no `layout.py`.
 
 ## 🗺️ 8. Roadmap e Evolução Tecnológica
 * **Front-End:** Migração da camada de apresentação (View) para **React**, visando escalabilidade corporativa assíncrona.

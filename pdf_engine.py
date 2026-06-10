@@ -1,5 +1,6 @@
 import io
 import urllib.parse
+import pandas as pd
 import streamlit as st
 from utils import formatar_moeda_simples, gerar_hash_item
 
