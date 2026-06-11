@@ -7,9 +7,15 @@ from utils import formatar_moeda_simples, gerar_hash_item
 try:
     from xhtml2pdf import pisa
 except ImportError:
-    pass
+    pisa = None  # Define como None para que possamos interceptar o erro de forma mais amigável
 
 def gerar_pdf_oficial(df_validos_tr, lotes_dict, valor_total_global, obj_global, regra_calculo, data_emissao, banco_precos):
+    
+    # Blindagem: Intercepta a falta da biblioteca antes de rodar toda a lógica
+    if pisa is None:
+        st.error("A biblioteca 'xhtml2pdf' não está instalada no servidor. Por favor, instale usando o comando: pip install xhtml2pdf")
+        return b"" # Retorna bytes vazios para evitar quebrar o Streamlit
+        
     html_pdf = f"""
     <html>
     <head>
@@ -89,7 +95,10 @@ def gerar_pdf_oficial(df_validos_tr, lotes_dict, valor_total_global, obj_global,
         h_id = gerar_hash_item(row)
         banco = banco_precos.get(h_id)
         if not banco: continue
-        df_rastreio = banco['df_manual_rastreio']
+        
+        # Uso do .get() para evitar key errors caso os dataframes estejam ausentes no dict
+        df_rastreio = banco.get('df_manual_rastreio', pd.DataFrame())
+        
         if not df_rastreio.empty:
             html_pdf += f"<h2>ITEM {row['Item']}: {row['Descrição']}</h2>"
             html_pdf += "<table repeat-header='yes'><thead><tr><th width='20%'>Empresa (CNPJ)</th><th width='25%'>Fonte da Pesquisa</th><th width='20%'>Contato (E-mail/Tel)</th><th width='10%'>Data/Hora</th><th width='15%'>Situação</th><th width='10%'>Preço</th></tr></thead><tbody>"
@@ -109,9 +118,9 @@ def gerar_pdf_oficial(df_validos_tr, lotes_dict, valor_total_global, obj_global,
         banco = banco_precos.get(h_id)
         if not banco: continue
         html_pdf += f"<h2>ITEM {row['Item']}: {row['Descrição']}</h2>"
-        html_pdf += f"<p style='margin-bottom: 24px;'><b>Média Saneada Aplicada:</b> {formatar_moeda_simples(banco['media_saneada'])} | <b>Amostras Válidas:</b> {banco['amostras']}</p>"
+        html_pdf += f"<p style='margin-bottom: 24px;'><b>Média Saneada Aplicada:</b> {formatar_moeda_simples(banco.get('media_saneada', 0))} | <b>Amostras Válidas:</b> {banco.get('amostras', 0)}</p>"
         
-        df_v = banco['df_validos']
+        df_v = banco.get('df_validos', pd.DataFrame())
         if not df_v.empty:
             html_pdf += "<h2>Preços Válidos Adotados no Cálculo</h2>"
             html_pdf += "<table repeat-header='yes'><thead><tr><th width='12%'>Data</th><th width='30%'>Empresa/Órgão</th><th width='18%'>Valor Unit.</th><th width='40%'>Origem (Fundamento)</th></tr></thead><tbody>"
@@ -120,7 +129,7 @@ def gerar_pdf_oficial(df_validos_tr, lotes_dict, valor_total_global, obj_global,
                 html_pdf += f"<tr><td class='center-txt'>{r['Data']}</td><td>{r['Empresa/Órgão']}</td><td class='center-txt'>{formatar_moeda_simples(r['Preço'])}</td><td>{orig_str}</td></tr>"
             html_pdf += "</tbody></table>"
             
-        df_o = banco['df_outliers']
+        df_o = banco.get('df_outliers', pd.DataFrame())
         if not df_o.empty:
             html_pdf += "<h2>Preços Descartados (Outliers ou Desmarcados Manualmente)</h2>"
             html_pdf += "<table repeat-header='yes'><thead><tr><th width='12%'>Data</th><th width='30%'>Empresa/Órgão</th><th width='18%'>Valor Unit.</th><th width='40%'>Origem (Fundamento)</th></tr></thead><tbody>"
@@ -129,9 +138,7 @@ def gerar_pdf_oficial(df_validos_tr, lotes_dict, valor_total_global, obj_global,
                 html_pdf += f"<tr><td class='center-txt'>{r['Data']}</td><td>{r['Empresa/Órgão']}</td><td class='center-txt'>{formatar_moeda_simples(r['Preço'])}</td><td>{orig_str}</td></tr>"
             html_pdf += "</tbody></table>"
     
-    # ---------------------------------------------------------
-    # NOVO: ANEXO III - TRILHA DE AUDITORIA DO PNCP
-    # ---------------------------------------------------------
+    # ANEXO III - TRILHA DE AUDITORIA DO PNCP
     html_pdf += "<div style='page-break-before: always;'></div>"
     html_pdf += "<h1>ANEXO III - TRILHA DE AUDITORIA DE BUSCAS NO PNCP</h1>"
     html_pdf += "<p style='margin-bottom: 24px;'>Este anexo documenta todas as tentativas de busca realizadas no Portal Nacional de Contratações Públicas (PNCP), assegurando a rastreabilidade e a transparência em conformidade com as diretrizes de pesquisa de preços.</p>"
